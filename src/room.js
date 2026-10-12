@@ -20,11 +20,26 @@ export class Room {
         currentRound: 0,
         totalRounds: 0,
         roundComplete: false,
+        emptySince: null, // 最后一位在线者离开的时间戳；用于空闲清理
         participants: {}, // id -> {id,name,online,inGame,survivors,picks,champion}
       };
       await this.state.storage.put("state", s);
     }
     return s;
+  }
+
+  // ===== 空闲清理：房间内 30 分钟无人在线则清除歌单缓存 =====
+  EVICT_AFTER_MS = 30 * 60 * 1000;
+
+  anyOnline(s) {
+    return Object.values(s.participants).some((p) => p && p.online);
+  }
+  cancelEviction() {
+    try { this.state.storage.deleteAlarm(); } catch {}
+  }
+  scheduleEviction(s) {
+    const fireAt = (s.emptySince ?? Date.now()) + this.EVICT_AFTER_MS;
+    try { this.state.storage.setAlarm(fireAt); } catch {}
   }
 
   // 根据某参与者的幸存歌曲列表，算出本轮的所有「二选一」对阵
@@ -124,6 +139,7 @@ export class Room {
   // 新连接建立后立即把当前状态推给它
   async webSocketOpen(ws) {
     const s = await this.getState();
+    this.cancelEviction(); // 有连接打开 = 房间非空，取消空闲清理
     try {
       ws.send(JSON.stringify({ type: "state", state: this.publicView(s) }));
     } catch {
@@ -170,6 +186,8 @@ export class Room {
         // 已在房间的老用户，若处于收集阶段且之前是旁观，则转为参赛
         if (s.phase === "collecting") existing.inGame = true;
       }
+      s.emptySince = null; // 有人在线，取消空闲清理计时
+      this.cancelEviction();
       changed = true;
     } else if (att.id && s.participants[att.id]) {
       const me = s.participants[att.id];
@@ -278,8 +296,14 @@ export class Room {
     const att = ws.deserializeAttachment() || {};
     if (att.id) {
       const s = await this.getState();
-      if (s.participants[att.id]) {
-        s.participants[att.id].online = false;
+      const me = s.participants[att.id];
+      if (me) {
+        me.online = false;
+        if (!this.anyOnline(s)) {
+          // 最后一人离开：记下时间，30 分钟后若仍无人则清除歌单缓存
+          if (s.emptySince == null) s.emptySince = Date.now();
+          this.scheduleEviction(s);
+        }
         await this.state.storage.put("state", s);
         await this.broadcast(s);
       }
@@ -293,5 +317,37 @@ export class Room {
 
   async webSocketError(ws) {
     await this.webSocketClose(ws);
+  }
+
+  // Durable Object Alarm：到时间后检查是否仍空房，是则清除歌单缓存
+  async alarm() {
+    const s = await this.getState();
+    if (this.anyOnline(s)) {
+      s.emptySince = null;
+      this.cancelEviction(); // 有人回来了，撤销清理
+      await this.state.storage.put("state", s);
+      return;
+    }
+    const deadline = (s.emptySince ?? Date.now()) + this.EVICT_AFTER_MS;
+    if (Date.now() >= deadline) {
+      // 30 分钟无人在线：清除歌单缓存并重置对局（保留离线参与者记录）
+      s.songs = [];
+      s.phase = "collecting";
+      s.currentRound = 0;
+      s.totalRounds = 0;
+      s.roundComplete = false;
+      for (const p of Object.values(s.participants)) {
+        p.inGame = true;
+        p.survivors = [];
+        p.picks = {};
+        p.champion = null;
+      }
+      s.emptySince = null;
+      this.cancelEviction();
+      await this.state.storage.put("state", s);
+      await this.broadcast(s);
+    } else {
+      this.scheduleEviction(s); // 还没到时间，按原 deadline 重新排期
+    }
   }
 }

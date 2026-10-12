@@ -26,6 +26,20 @@ export default {
     }
 
     // 静态资源（未命中时回退到 index.html，支持纯前端路由）
-    return env.ASSETS.fetch(request);
+    const assetResp = await env.ASSETS.fetch(request);
+    const p = url.pathname;
+    const isPageAsset =
+      p === "/" || p.endsWith("/") || /\.(html?|js|css|json|map|svg|png|jpg|jpeg|gif|webp|ico|woff2?)$/i.test(p);
+    if (isPageAsset) {
+      // 关闭强缓存，确保发布新版本后浏览器/边缘不会一直用旧 app.js / style.css
+      const headers = new Headers(assetResp.headers);
+      headers.set("Cache-Control", "no-cache");
+      return new Response(assetResp.body, {
+        status: assetResp.status,
+        statusText: assetResp.statusText,
+        headers,
+      });
+    }
+    return assetResp;
   },
 };

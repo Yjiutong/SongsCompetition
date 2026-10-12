@@ -67,6 +67,12 @@ function leaveRoom() {
   showView("view-join");
 }
 
+// 清除网页缓存：带时间戳参数强制重新拉取最新页面与静态资源
+function clearCache() {
+  const sep = location.search ? "&" : "?";
+  location.href = location.pathname + location.search + sep + "_cb=" + Date.now();
+}
+
 function copyLink() {
   const url = location.origin + location.pathname + "?room=" + encodeURIComponent(getRoom());
   navigator.clipboard.writeText(url).then(
