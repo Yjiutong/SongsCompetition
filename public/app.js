@@ -190,6 +190,16 @@ function resetGame() {
 
 // ===== 渲染 =====
 function render() {
+  try {
+    renderInner();
+  } catch (err) {
+    // 任何渲染异常都不该让界面白屏：打到控制台并提示用户
+    console.error("[render error]", err);
+    toast("界面渲染出错：" + (err && err.message ? err.message : String(err)));
+  }
+}
+
+function renderInner() {
   const phase = state.phase || "collecting";
 
   if (phase === "collecting") {
@@ -304,15 +314,19 @@ function renderPlaying() {
 
   // 我的对阵
   const myPairs = document.getElementById("myPairs");
-  if (!mine || !mine.pairs || mine.pairs.length === 0) {
-    myPairs.innerHTML = '<div class="empty">你在本局是旁观者，可看大家的选择</div>';
+  if (!mine) {
+    myPairs.innerHTML = '<div class="empty">正在同步你的身份…</div>';
+  } else if (!mine.inGame) {
+    myPairs.innerHTML = '<div class="empty">你在本局是旁观者，可看大家的选择（下一局自动参赛）</div>';
+  } else if (!mine.pairs || mine.pairs.length === 0) {
+    myPairs.innerHTML = '<div class="empty">等待本局开始…</div>';
   } else {
     myPairs.innerHTML = "";
     mine.pairs.forEach((pr, idx) => {
       const card = document.createElement("div");
       card.className = "pair-card";
       if (pr.b === null) {
-        // 轮空
+        // 轮空：自动晋级，无需选择
         card.classList.add("bye");
         const a = document.createElement("div");
         a.className = "song-opt bye-opt";
@@ -320,7 +334,8 @@ function renderPlaying() {
         a.querySelector(".opt-title").textContent = songTitle(pr.a);
         card.appendChild(a);
       } else {
-        const picked = mine.picks[idx];
+        // 本轮我的选择：后端把 pick 直接挂在每个对阵上
+        const picked = pr.pick != null ? pr.pick : null;
         [pr.a, pr.b].forEach((id) => {
           const opt = document.createElement("button");
           opt.className = "song-opt" + (picked === id ? " picked" : "");

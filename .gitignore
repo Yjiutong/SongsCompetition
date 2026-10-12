@@ -8,6 +8,9 @@
 # ===== Node =====
 node_modules/
 
+# ===== 本地开发用（Agent 校验脚本等，不参与部署）=====
+.workbuddy/tmp/
+
 # ===== OS / 编辑器 =====
 .DS_Store
 Thumbs.db
