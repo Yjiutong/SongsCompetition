@@ -5,7 +5,8 @@ compatibility_date = "2025-06-01"
 # 静态资源目录：纯前端页面由 Workers Static Assets 直接托管
 [assets]
 directory = "public"
-not_found_handling = "index.html"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
 
 # Durable Object：每个房间一个实例，负责实时状态与 WebSocket 广播
 [[durable_objects.bindings]]
