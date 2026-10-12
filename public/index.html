@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>共享歌单 · 多人点歌</title>
+<title>歌曲淘汰赛 · 多人实时</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>♫</text></svg>">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700;900&family=Noto+Sans+SC:wght@300;400;500;700&display=swap">
 <link rel="stylesheet" href="./style.css">
@@ -15,8 +15,8 @@
   <div class="container narrow">
     <div class="join-card">
       <div class="logo">♫</div>
-      <h1>共享歌单</h1>
-      <p class="subtitle">输入房间号，多人一起点歌、互相挑选、实时公示</p>
+      <h1>歌曲淘汰赛</h1>
+      <p class="subtitle">输入房间号，多人一起添加歌单，逐轮二选一，淘汰到每人一首</p>
 
       <label class="field-label">房间号</label>
       <input id="roomInput" class="field" type="text" placeholder="例如 party-2026" maxlength="32" autocomplete="off">
@@ -25,7 +25,7 @@
       <input id="nameInput" class="field" type="text" placeholder="例如 小明" maxlength="24" autocomplete="off">
 
       <button id="joinBtn" class="btn btn-primary btn-block" onclick="joinRoom()">进入房间</button>
-      <p class="hint">同一房间号的人会进入同一个歌单；把房间号或链接发给朋友即可一起玩。</p>
+      <p class="hint">同一房间号的人进入同一房间；把房间号或链接发给朋友即可一起玩。</p>
     </div>
   </div>
 </div>
@@ -45,37 +45,80 @@
       </div>
     </header>
 
-    <!-- 添加歌曲 -->
-    <section class="panel">
-      <h2 class="panel-title">添加歌曲到共享歌单</h2>
-      <div class="add-row">
-        <input id="songTitle" class="field" type="text" placeholder="歌名" maxlength="80" autocomplete="off">
-        <input id="songArtist" class="field" type="text" placeholder="歌手（可选）" maxlength="80" autocomplete="off">
-        <button class="btn btn-primary" onclick="addSong()">添加</button>
-      </div>
-      <div class="add-tools">
-        <button class="btn btn-ghost btn-sm" onclick="clearSongs()">清空歌单</button>
-        <span class="muted" id="songCount">共 0 首</span>
+    <!-- ===== 收集阶段 ===== -->
+    <section id="phase-collecting" class="phase">
+      <section class="panel">
+        <h2 class="panel-title">添加歌曲到共享歌单</h2>
+        <div class="add-row">
+          <input id="songTitle" class="field" type="text" placeholder="歌名" maxlength="80" autocomplete="off">
+          <input id="songArtist" class="field" type="text" placeholder="歌手（可选）" maxlength="80" autocomplete="off">
+          <button class="btn btn-primary" onclick="addSong()">添加</button>
+        </div>
+        <div class="add-tools">
+          <button class="btn btn-ghost btn-sm" onclick="clearSongs()">清空歌单</button>
+          <span class="muted" id="songCount">共 0 首</span>
+        </div>
+      </section>
+
+      <div class="grid">
+        <section class="panel">
+          <h2 class="panel-title">共享歌单</h2>
+          <div id="playlist" class="playlist">
+            <div class="empty">还没有歌曲，在上面添加第一首吧 ♪</div>
+          </div>
+          <div class="start-bar">
+            <button id="startBtn" class="btn btn-primary btn-block" onclick="startGame()">开始淘汰赛</button>
+            <p id="startHint" class="hint center"></p>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2 class="panel-title">参赛者 <span class="muted" id="inGameCount"></span></h2>
+          <div id="people" class="people">
+            <div class="empty">等待大家进入房间…</div>
+          </div>
+        </section>
       </div>
     </section>
 
-    <div class="grid">
-      <!-- 共享歌单 -->
-      <section class="panel">
-        <h2 class="panel-title">共享歌单 <span class="muted" id="mePickCount"></span></h2>
-        <div id="playlist" class="playlist">
-          <div class="empty">还没有歌曲，在上面添加第一首吧 ♪</div>
-        </div>
-      </section>
+    <!-- ===== 淘汰赛阶段 ===== -->
+    <section id="phase-playing" class="phase">
+      <div class="round-bar">
+        <div class="round-no">第 <span id="roundNo">1</span> / <span id="roundTotal">?</span> 轮</div>
+        <div class="round-status" id="roundStatus"></div>
+      </div>
 
-      <!-- 大家的选择 -->
-      <section class="panel">
-        <h2 class="panel-title">大家的选择</h2>
-        <div id="board" class="board">
-          <div class="empty">等待大家选歌…</div>
-        </div>
-      </section>
-    </div>
+      <div class="grid">
+        <section class="panel">
+          <h2 class="panel-title">你的对阵 <span class="muted">点击二选一</span></h2>
+          <div id="myPairs" class="pairs">
+            <div class="empty">等待本局开始…</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2 class="panel-title">本轮所有人的选择</h2>
+          <div id="board" class="board">
+            <div class="empty">等待大家选择…</div>
+          </div>
+        </section>
+      </div>
+
+      <div class="actions center">
+        <button id="nextBtn" class="btn btn-primary btn-lg" onclick="nextRound()">下一轮</button>
+      </div>
+    </section>
+
+    <!-- ===== 结束阶段 ===== -->
+    <section id="phase-finished" class="phase">
+      <h2 class="panel-title big">🏆 每个人的最终歌曲</h2>
+      <div id="champions" class="champions">
+        <div class="empty">—</div>
+      </div>
+      <div class="actions center">
+        <button class="btn btn-ghost btn-lg" onclick="resetGame()">再来一局（保留歌单）</button>
+      </div>
+    </section>
   </div>
 </div>
 

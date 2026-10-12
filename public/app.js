@@ -1,6 +1,6 @@
 // ===== 身份（跨刷新保持）=====
 const me = { id: null, name: "" };
-let state = { songs: [], participants: [] };
+let state = { phase: "collecting", songs: [], participants: [] };
 let ws = null;
 let reconnectTimer = null;
 let pollTimer = null;
@@ -26,6 +26,10 @@ function showView(id) {
   document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
   document.getElementById(id).classList.add("active");
   window.scrollTo(0, 0);
+}
+function showPhase(id) {
+  document.querySelectorAll(".phase").forEach((v) => v.classList.remove("active"));
+  document.getElementById(id).classList.add("active");
 }
 
 // ===== Toast =====
@@ -126,11 +130,11 @@ function send(obj) {
   }
 }
 
-// 轮询回退：即使 WebSocket 临时不可用，也能保持状态同步
+// 轮询回退：WebSocket 临时不可用时仍能同步状态
 function startPoll() {
   clearInterval(pollTimer);
   pollTimer = setInterval(async () => {
-    if (ws && ws.readyState === WebSocket.OPEN) return; // 有 WS 就不轮询
+    if (ws && ws.readyState === WebSocket.OPEN) return;
     const room = getRoom();
     if (!room) return;
     try {
@@ -156,33 +160,62 @@ function addSong() {
   titleEl.focus();
 }
 
-function togglePick(songId) {
-  const mine = state.participants.find((p) => p.id === me.id);
-  const cur = mine ? mine.picks.slice() : [];
-  const i = cur.indexOf(songId);
-  if (i >= 0) cur.splice(i, 1);
-  else cur.push(songId);
-  send({ type: "pick", songIds: cur });
-}
-
 function removeSong(songId) {
-  if (!confirm("从歌单中删除这首歌？所有人的相关选择也会清除。")) return;
+  if (!confirm("从歌单中删除这首歌？")) return;
   send({ type: "remove_song", songId });
 }
 
 function clearSongs() {
-  if (!confirm("清空整个歌单？所有人的选择也会清空。")) return;
+  if (!confirm("清空整个歌单？")) return;
   send({ type: "clear_songs" });
+}
+
+function startGame() {
+  if (state.songs.length < 2) return toast("至少添加 2 首歌");
+  if (state.songs.length % 2 !== 0) return toast("歌曲数量必须为偶数才能开始");
+  send({ type: "start" });
+}
+
+function choosePair(pairIndex, songId) {
+  send({ type: "choose", pairIndex, songId });
+}
+
+function nextRound() {
+  send({ type: "next_round" });
+}
+
+function resetGame() {
+  send({ type: "reset" });
 }
 
 // ===== 渲染 =====
 function render() {
-  const songMap = {};
+  const phase = state.phase || "collecting";
+
+  if (phase === "collecting") {
+    showPhase("phase-collecting");
+    renderCollecting();
+  } else if (phase === "playing") {
+    showPhase("phase-playing");
+    renderPlaying();
+  } else if (phase === "finished") {
+    showPhase("phase-finished");
+    renderFinished();
+  }
+}
+
+const songMap = {};
+function refreshMaps() {
+  for (const k in songMap) delete songMap[k];
   state.songs.forEach((s) => (songMap[s.id] = s));
-  const nameMap = {};
-  state.participants.forEach((p) => (nameMap[p.id] = p.name));
+}
+function songTitle(id) {
+  return songMap[id] ? songMap[id].title : "（已删除）";
+}
+
+function renderCollecting() {
+  refreshMaps();
   const mine = state.participants.find((p) => p.id === me.id);
-  const myPicks = mine ? mine.picks : [];
 
   // 歌单
   const pl = document.getElementById("playlist");
@@ -191,71 +224,189 @@ function render() {
   } else {
     pl.innerHTML = "";
     state.songs.forEach((s) => {
-      const picked = myPicks.includes(s.id);
-      const byName = s.addedBy ? nameMap[s.addedBy] || "某人" : "—";
       const row = document.createElement("div");
-      row.className = "song" + (picked ? " picked" : "");
+      row.className = "song";
+      const byName = s.addedBy ? (state.participants.find((p) => p.id === s.addedBy) || {}).name || "某人" : "—";
       row.innerHTML = `
         <div class="song-main">
           <div class="song-title"></div>
           <div class="song-sub">${s.artist ? escapeHtml(s.artist) + " · " : ""}<span class="by">${escapeHtml(byName)}</span> 添加</div>
         </div>
-        <button class="pick-btn" onclick="togglePick('${s.id}')">${picked ? "已选 ✓" : "选"}</button>
         <button class="del-btn" title="删除" onclick="removeSong('${s.id}')">×</button>`;
       row.querySelector(".song-title").textContent = s.title;
       pl.appendChild(row);
     });
   }
 
-  // 头部计数
   document.getElementById("songCount").textContent = "共 " + state.songs.length + " 首";
-  document.getElementById("mePickCount").textContent = myPicks.length
-    ? "· 你已选 " + myPicks.length + " 首"
-    : "";
 
-  // 大家的选择
+  // 开始按钮
+  const even = state.songs.length >= 2 && state.songs.length % 2 === 0;
+  const startBtn = document.getElementById("startBtn");
+  const hint = document.getElementById("startHint");
+  if (state.songs.length < 2) {
+    startBtn.disabled = true;
+    startBtn.textContent = "开始淘汰赛";
+    hint.textContent = "至少添加 2 首歌后开始";
+  } else if (!even) {
+    startBtn.disabled = true;
+    startBtn.textContent = "开始淘汰赛";
+    hint.textContent = "歌曲数量需为偶数（当前 " + state.songs.length + " 首），再加/删一首即可";
+  } else {
+    startBtn.disabled = false;
+    startBtn.textContent = "开始淘汰赛（" + state.songs.length + " 首）";
+    hint.textContent = "全员准备就绪后点击，开始逐轮二选一";
+  }
+
+  // 参赛者
+  const inGame = state.participants.filter((p) => p.inGame);
+  document.getElementById("inGameCount").textContent = "· " + inGame.length + " 人";
+  const people = document.getElementById("people");
+  if (inGame.length === 0) {
+    people.innerHTML = '<div class="empty">等待大家进入房间…</div>';
+  } else {
+    people.innerHTML = "";
+    inGame.forEach((p) => {
+      const c = document.createElement("div");
+      c.className = "person" + (p.id === me.id ? " me" : "");
+      c.innerHTML = `
+        <span class="dot ${p.online ? "online" : ""}"></span>
+        <span class="person-name"></span>`;
+      c.querySelector(".person-name").textContent = p.name + (p.id === me.id ? "（你）" : "");
+      people.appendChild(c);
+    });
+  }
+}
+
+function participantDone(p) {
+  if (!p.pairs) return false;
+  return p.pairs.every((pr) => pr.b === null || pr.pick != null);
+}
+
+function renderPlaying() {
+  refreshMaps();
+  const mine = state.participants.find((p) => p.id === me.id);
+
+  document.getElementById("roundNo").textContent = (state.currentRound + 1);
+  document.getElementById("roundTotal").textContent = state.totalRounds;
+
+  // 本轮进度
+  const inGame = state.participants.filter((p) => p.inGame && p.pairs);
+  const done = inGame.filter(participantDone).length;
+  const statusEl = document.getElementById("roundStatus");
+  if (state.roundComplete) {
+    statusEl.textContent = "本轮已全部选择 ✓ 可进入下一轮";
+    statusEl.className = "round-status done";
+  } else {
+    statusEl.textContent = "等待选择中… " + done + " / " + inGame.length + " 人已完成";
+    statusEl.className = "round-status";
+  }
+
+  // 我的对阵
+  const myPairs = document.getElementById("myPairs");
+  if (!mine || !mine.pairs || mine.pairs.length === 0) {
+    myPairs.innerHTML = '<div class="empty">你在本局是旁观者，可看大家的选择</div>';
+  } else {
+    myPairs.innerHTML = "";
+    mine.pairs.forEach((pr, idx) => {
+      const card = document.createElement("div");
+      card.className = "pair-card";
+      if (pr.b === null) {
+        // 轮空
+        card.classList.add("bye");
+        const a = document.createElement("div");
+        a.className = "song-opt bye-opt";
+        a.innerHTML = '<span class="vs-tag">轮空</span><span class="opt-title"></span>';
+        a.querySelector(".opt-title").textContent = songTitle(pr.a);
+        card.appendChild(a);
+      } else {
+        const picked = mine.picks[idx];
+        [pr.a, pr.b].forEach((id) => {
+          const opt = document.createElement("button");
+          opt.className = "song-opt" + (picked === id ? " picked" : "");
+          opt.innerHTML = '<span class="opt-title"></span>';
+          opt.querySelector(".opt-title").textContent = songTitle(id);
+          opt.onclick = () => choosePair(idx, id);
+          card.appendChild(opt);
+        });
+        const vs = document.createElement("div");
+        vs.className = "vs";
+        vs.textContent = "VS";
+        card.insertBefore(vs, card.children[1]);
+      }
+      myPairs.appendChild(card);
+    });
+  }
+
+  // 公布所有人的选择
   const board = document.getElementById("board");
-  const people = state.participants.slice().sort((a, b) => b.picks.length - a.picks.length);
-  if (people.length === 0) {
-    board.innerHTML = '<div class="empty">等待大家选歌…</div>';
+  const others = state.participants.slice().sort((a, b) => (b.inGame ? 1 : 0) - (a.inGame ? 1 : 0));
+  if (others.length === 0) {
+    board.innerHTML = '<div class="empty">等待大家选择…</div>';
   } else {
     board.innerHTML = "";
-    people.forEach((p) => {
-      const isMe = p.id === me.id;
+    others.forEach((p) => {
       const card = document.createElement("div");
-      card.className = "person" + (isMe ? " me" : "");
-      let picksHtml;
-      if (p.picks.length === 0) {
-        picksHtml = '<span class="pick-empty">还没选</span>';
+      card.className = "person" + (p.id === me.id ? " me" : "");
+      const head = document.createElement("div");
+      head.className = "person-head";
+      head.innerHTML = '<span class="dot"></span><span class="person-name"></span>';
+      head.querySelector(".person-name").textContent = p.name + (p.id === me.id ? "（你）" : "");
+      if (p.online) head.querySelector(".dot").classList.add("online");
+      card.appendChild(head);
+
+      const picks = document.createElement("div");
+      picks.className = "person-picks";
+      if (!p.inGame) {
+        picks.innerHTML = '<span class="pick-empty">旁观者</span>';
+      } else if (!p.pairs || p.pairs.length === 0) {
+        picks.innerHTML = '<span class="pick-empty">等待开始</span>';
       } else {
-        picksHtml = p.picks
-          .map((id) => {
-            const t = songMap[id] ? songMap[id].title : "（已删除）";
-            return '<span class="pick-chip"></span>';
-          })
-          .join("");
-      }
-      card.innerHTML = `
-        <div class="person-head">
-          <span class="dot ${p.online ? "online" : ""}"></span>
-          <span class="person-name"></span>
-        </div>
-        <div class="person-picks">${picksHtml}</div>`;
-      card.querySelector(".person-name").textContent = p.name + (isMe ? "（你）" : "");
-      // 用 textContent 填充 chip，避免 XSS
-      if (p.picks.length) {
-        const wrap = card.querySelector(".person-picks");
-        wrap.innerHTML = "";
-        p.picks.forEach((id) => {
-          const chip = document.createElement("span");
-          chip.className = "pick-chip";
-          chip.textContent = songMap[id] ? songMap[id].title : "（已删除）";
-          wrap.appendChild(chip);
+        p.pairs.forEach((pr) => {
+          if (pr.b === null) {
+            const chip = document.createElement("span");
+            chip.className = "pick-chip bye-chip";
+            chip.textContent = "轮空：" + songTitle(pr.a);
+            picks.appendChild(chip);
+          } else {
+            const chip = document.createElement("span");
+            const chosen = pr.pick;
+            chip.className = "pick-chip" + (chosen ? " chosen" : "");
+            chip.textContent = chosen ? songTitle(chosen) : "（未选）";
+            picks.appendChild(chip);
+          }
         });
       }
+      card.appendChild(picks);
       board.appendChild(card);
     });
   }
+
+  // 下一轮按钮
+  const nextBtn = document.getElementById("nextBtn");
+  nextBtn.disabled = !state.roundComplete;
+}
+
+function renderFinished() {
+  refreshMaps();
+  const ch = document.getElementById("champions");
+  const inGame = state.participants.filter((p) => p.inGame && p.champion);
+  if (inGame.length === 0) {
+    ch.innerHTML = '<div class="empty">—</div>';
+    return;
+  }
+  ch.innerHTML = "";
+  inGame.forEach((p) => {
+    const card = document.createElement("div");
+    card.className = "champion" + (p.id === me.id ? " me" : "");
+    card.innerHTML = `
+      <span class="dot ${p.online ? "online" : ""}"></span>
+      <span class="champ-name"></span>
+      <span class="champ-song"></span>`;
+    card.querySelector(".champ-name").textContent = p.name + (p.id === me.id ? "（你）" : "");
+    card.querySelector(".champ-song").textContent = songTitle(p.champion);
+    ch.appendChild(card);
+  });
 }
 
 function escapeHtml(s) {
@@ -268,7 +419,7 @@ function escapeHtml(s) {
   })[c]);
 }
 
-// 回车快捷添加
+// 回车快捷
 document.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && document.activeElement === document.getElementById("songArtist")) addSong();
 });
@@ -285,5 +436,5 @@ loadIdentity();
   const room = getRoom();
   if (room) document.getElementById("roomInput").value = room;
   if (me.name) document.getElementById("nameInput").value = me.name;
-  if (room && me.name) joinRoom(); // 通过分享链接进入时自动进场
+  if (room && me.name) joinRoom();
 })();
