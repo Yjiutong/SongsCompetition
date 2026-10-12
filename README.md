@@ -54,8 +54,9 @@
 ├── public/                # 前端静态资源（部署后即为站点根）
 │   ├── index.html
 │   ├── style.css
-│   ├── app.js
-│   └── admin.html         # 管理员后台页面（数据接口需 ADMIN_TOKEN）
+│   ├── app.js             # 前端逻辑（未压缩、可直接阅读）
+│   ├── admin.html         # 管理员后台页面（数据接口需 ADMIN_TOKEN）
+│   └── admin.js           # 管理员后台逻辑（未压缩、可直接阅读）
 └── legacy/
     └── SongsCompetition.html   # 原单机版（不参与部署）
 ```
@@ -166,6 +167,7 @@ Workers 运行时的 `DurableObjectNamespace` 只有 `idFromName / newUniqueId /
 
 - 后台页面 `admin.html` 本身只是前端外壳，所有数据接口都要求正确的 `ADMIN_TOKEN`，无令牌时拿不到任何房间信息。
 - 令牌即后台的访问凭证，请妥善保管；怀疑泄露时在 Cloudflare 后台重置 Secret 即可立即失效。
+- 前端源码（`public/app.js`、`public/admin.js`）为**未压缩的可读 JavaScript**，方便查看与调试。真正的游戏规则（对阵生成、选票校验、淘汰判定）全部在服务端的 Durable Object 里执行，前端只是展示层，因此即使读到前端代码也无法篡改对局结果。
 
 ## 使用说明
 
