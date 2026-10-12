@@ -1,0 +1,10 @@
+{
+  "name": "songs-competition",
+  "version": "1.0.0",
+  "private": true,
+  "description": "多人实时共享歌单：输入房间号共同添加歌单、各自选歌、实时公示。纯 Cloudflare（Workers + Durable Object）。",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  }
+}

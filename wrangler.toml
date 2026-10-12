@@ -1,0 +1,21 @@
+name = "songs-competition"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
+
+# 静态资源目录：纯前端页面由 Workers Static Assets 直接托管
+[assets]
+directory = "public"
+not_found_handling = "index.html"
+
+# Durable Object：每个房间一个实例，负责实时状态与 WebSocket 广播
+[[durable_objects.bindings]]
+name = "ROOM"
+class_name = "Room"
+
+# 首次部署需要这个 migration 来注册 Room 类
+[[migrations]]
+tag = "v1"
+new_classes = ["Room"]
+
+# 如需固定账号，可取消下面一行注释并填入你的 Cloudflare Account ID
+# account_id = "your-account-id"

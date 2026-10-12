@@ -1,0 +1,16 @@
+# ===== Cloudflare / Wrangler =====
+.wrangler/
+.dryrun/
+.dev.vars
+.env
+.env.*
+
+# ===== Node =====
+node_modules/
+
+# ===== OS / 编辑器 =====
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/

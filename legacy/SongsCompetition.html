@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>歌曲淘汰赛</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>♫</text></svg>">
+<link rel="stylesheet" href="https://miaoda.feishu.cn/fonts/css2?family=Noto+Serif+SC:wght@400;600;700;900&family=Noto+Sans+SC:wght@300;400;500;700&display=swap">
+<style>
+:root{
+  --bg:#0c0c10;
+  --bg-soft:#16161e;
+  --card:#1c1c26;
+  --gold:#d4a843;
+  --gold-soft:#e8c96a;
+  --text:#f0ece2;
+  --text-dim:#8a8698;
+  --line:#2a2a38;
+  --win:#4ade80;
+  --bye:#60a5fa;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{background:var(--bg);color:var(--text);font-family:'Noto Sans SC',system-ui,sans-serif;min-height:100vh}
+h1,h2,h3,.serif{font-family:'Noto Serif SC',serif}
+
+.view{display:none;min-height:100vh;padding:32px 20px 60px}
+.view.active{display:block}
+.container{max-width:1100px;margin:0 auto}
+.btn{
+  display:inline-block;padding:12px 32px;border:none;border-radius:6px;
+  font-size:15px;font-weight:500;cursor:pointer;transition:all .2s;
+  font-family:inherit;
+}
+.btn-primary{background:var(--gold);color:#1a1a1a}
+.btn-primary:hover{background:var(--gold-soft);transform:translateY(-1px)}
+.btn-primary:disabled{background:#555;color:#999;cursor:not-allowed;transform:none}
+.btn-ghost{background:transparent;color:var(--text-dim);border:1px solid var(--line)}
+.btn-ghost:hover{color:var(--text);border-color:var(--text-dim)}
+
+/* ===== 输入页 ===== */
+#view-input .header{text-align:center;margin-bottom:32px}
+#view-input h1{font-size:clamp(28px,5vw,42px);font-weight:900;letter-spacing:2px;margin-bottom:8px}
+#view-input .subtitle{color:var(--text-dim);font-size:14px}
+.input-grid{
+  display:grid;grid-template-columns:repeat(2,1fr);gap:8px 16px;
+  margin-bottom:24px;
+}
+@media(min-width:640px){.input-grid{grid-template-columns:repeat(4,1fr)}}
+@media(min-width:900px){.input-grid{grid-template-columns:repeat(8,1fr)}}
+.song-input{position:relative}
+.song-input input{
+  width:100%;padding:8px 10px 8px 28px;background:var(--bg-soft);
+  border:1px solid var(--line);border-radius:4px;color:var(--text);
+  font-size:13px;font-family:inherit;outline:none;transition:border-color .2s;
+}
+.song-input input:focus{border-color:var(--gold)}
+.song-input .idx{
+  position:absolute;left:8px;top:50%;transform:translateY(-50%);
+  font-size:11px;color:var(--text-dim);font-variant-numeric:tabular-nums;
+  pointer-events:none;
+}
+.input-actions{text-align:center;display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+.fill-hint{color:var(--text-dim);font-size:13px;margin-bottom:16px;text-align:center}
+.fill-hint.ok{color:var(--win)}
+.fill-hint.err{color:#f87171}
+.secret-row{display:flex;gap:8px;justify-content:center;align-items:center;margin-bottom:20px;flex-wrap:wrap}
+.secret-row input{
+  padding:8px 12px;background:var(--bg-soft);border:1px solid var(--line);
+  border-radius:4px;color:var(--text);font-size:13px;font-family:inherit;
+  outline:none;width:200px;transition:border-color .2s;
+}
+.secret-row input:focus{border-color:var(--gold)}
+.secret-row .secret-btn{
+  padding:8px 16px;background:transparent;border:1px solid var(--line);
+  border-radius:4px;color:var(--text-dim);font-size:13px;cursor:pointer;
+  font-family:inherit;transition:all .2s;
+}
+.secret-row .secret-btn:hover{color:var(--text);border-color:var(--text-dim)}
+.secret-row .secret-status{font-size:13px;color:var(--gold);display:none}
+
+/* ===== 金字塔页 ===== */
+#view-pyramid .pyramid-header{text-align:center;margin-bottom:24px}
+#view-pyramid h2{font-size:clamp(22px,4vw,32px);font-weight:700;margin-bottom:4px}
+#view-pyramid .round-info{color:var(--gold);font-size:14px;letter-spacing:1px}
+.pyramid{
+  display:flex;flex-direction:column-reverse;align-items:center;gap:14px;
+  margin-bottom:28px;
+}
+.tier{
+  display:flex;flex-wrap:wrap;justify-content:center;gap:4px;
+  max-width:100%;padding:8px 12px;border-radius:6px;
+  transition:background .3s;
+}
+.tier.active{background:rgba(212,168,67,.08);outline:1px solid rgba(212,168,67,.3)}
+.tier-label{
+  width:100%;text-align:center;font-size:11px;color:var(--text-dim);
+  margin-bottom:4px;letter-spacing:1px;
+}
+.chip{
+  display:inline-block;padding:3px 8px;border-radius:3px;
+  font-size:11px;background:var(--card);color:var(--text-dim);
+  border:1px solid var(--line);white-space:nowrap;max-width:140px;
+  overflow:hidden;text-overflow:ellipsis;
+}
+.chip.current{background:rgba(212,168,67,.15);color:var(--gold-soft);border-color:rgba(212,168,67,.4)}
+.chip.winner{background:rgba(74,222,128,.12);color:var(--win);border-color:rgba(74,222,128,.3)}
+.chip.bye{background:rgba(96,165,250,.12);color:var(--bye);border-color:rgba(96,165,250,.3)}
+.pyramid-actions{text-align:center}
+.progress-bar{
+  width:100%;max-width:400px;margin:0 auto 20px;height:4px;background:var(--bg-soft);
+  border-radius:2px;overflow:hidden;
+}
+.progress-bar .fill{height:100%;background:var(--gold);transition:width .3s;width:0%}
+.bye-notice{
+  text-align:center;color:var(--bye);font-size:13px;margin-bottom:16px;
+}
+
+/* ===== 对战页 ===== */
+#view-battle{display:none;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;padding:20px}
+#view-battle.active{display:flex}
+.battle-header{text-align:center;margin-bottom:32px}
+.battle-header .round-tag{color:var(--gold);font-size:13px;letter-spacing:2px;margin-bottom:8px}
+.battle-header h2{font-size:clamp(20px,4vw,28px);font-weight:700}
+.battle-header .pair-count{color:var(--text-dim);font-size:13px;margin-top:6px}
+.battle-arena{
+  display:flex;gap:clamp(16px,4vw,48px);align-items:stretch;
+  width:100%;max-width:900px;justify-content:center;flex-wrap:wrap;
+}
+.battle-card{
+  flex:1;min-width:260px;max-width:400px;padding:clamp(24px,4vw,40px) 24px;
+  background:var(--card);border:1px solid var(--line);border-radius:10px;
+  cursor:pointer;transition:all .25s;text-align:center;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  min-height:200px;
+}
+.battle-card:hover{border-color:var(--gold);transform:translateY(-3px);box-shadow:0 8px 30px rgba(212,168,67,.15)}
+.battle-card:active{transform:translateY(-1px)}
+.battle-card .card-label{font-size:12px;color:var(--text-dim);letter-spacing:2px;margin-bottom:16px}
+.battle-card .song-name{font-family:'Noto Serif SC',serif;font-size:clamp(18px,3vw,26px);font-weight:600;line-height:1.5;word-break:break-all}
+.battle-card .pick-hint{margin-top:20px;font-size:12px;color:var(--gold);opacity:0;transition:opacity .2s}
+.battle-card:hover .pick-hint{opacity:1}
+.vs{
+  display:flex;align-items:center;justify-content:center;
+  font-family:'Noto Serif SC',serif;font-size:28px;font-weight:900;
+  color:var(--gold);opacity:.6;
+}
+@media(max-width:640px){
+  .battle-arena{flex-direction:column;align-items:center}
+  .vs{padding:8px 0}
+  .battle-card{min-height:140px;width:100%}
+}
+
+/* ===== 结果页 ===== */
+#view-result{display:none;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;text-align:center;padding:40px 20px}
+#view-result.active{display:flex}
+#view-result .crown{margin-bottom:16px;opacity:.9}
+#view-result h2{font-size:14px;color:var(--text-dim);letter-spacing:3px;margin-bottom:16px;font-weight:400}
+#view-result .winner-name{
+  font-family:'Noto Serif SC',serif;font-size:clamp(32px,7vw,56px);
+  font-weight:900;color:var(--gold);margin-bottom:8px;line-height:1.3;
+  word-break:break-all;
+}
+#view-result .winner-sub{color:var(--text-dim);font-size:14px;margin-bottom:40px}
+#view-result .final-pyramid{margin-bottom:32px;max-width:100%;overflow-x:auto;width:100%}
+</style>
+</head>
+<body>
+
+<!-- ===== 视图：输入 ===== -->
+<div id="view-input" class="view active">
+  <div class="container">
+    <div class="header">
+      <h1>歌曲淘汰赛</h1>
+      <div class="subtitle">两两对决 · 决出唯一冠军（至少 2 首，须为偶数）</div>
+    </div>
+    <div class="secret-row">
+      <input type="password" id="secretInput" placeholder="输入秘钥解锁隐藏曲目" maxlength="20">
+      <button class="secret-btn" onclick="checkSecret()">解锁</button>
+      <span class="secret-status" id="secretStatus">秘钥模式已开启</span>
+    </div>
+    <div class="fill-hint" id="fillHint">已填写 0 首</div>
+    <div class="input-grid" id="inputGrid"></div>
+    <div class="input-actions">
+      <button class="btn btn-ghost" onclick="fillDemo()">填入示例</button>
+      <button class="btn btn-ghost" onclick="clearAll()">清空</button>
+      <button class="btn btn-primary" id="confirmBtn" onclick="confirmSongs()" disabled>确认歌单</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 视图：金字塔 ===== -->
+<div id="view-pyramid" class="view">
+  <div class="container">
+    <div class="pyramid-header">
+      <h2 id="pyramidTitle">晋级金字塔</h2>
+      <div class="round-info" id="roundInfo"></div>
+    </div>
+    <div class="progress-bar"><div class="fill" id="progressFill"></div></div>
+    <div class="bye-notice" id="byeNotice" style="display:none"></div>
+    <div class="pyramid" id="pyramid"></div>
+    <div class="pyramid-actions">
+      <button class="btn btn-primary" id="startRoundBtn" onclick="startBattle()">开始本轮对决</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 视图：对战 ===== -->
+<div id="view-battle" class="view">
+  <div class="battle-header">
+    <div class="round-tag" id="battleRoundTag"></div>
+    <h2>二选一</h2>
+    <div class="pair-count" id="pairCount"></div>
+  </div>
+  <div class="battle-arena">
+    <div class="battle-card" id="cardA" onclick="pick(0)">
+      <div class="card-label">A</div>
+      <div class="song-name" id="songA"></div>
+      <div class="pick-hint">点击选择</div>
+    </div>
+    <div class="vs">VS</div>
+    <div class="battle-card" id="cardB" onclick="pick(1)">
+      <div class="card-label">B</div>
+      <div class="song-name" id="songB"></div>
+      <div class="pick-hint">点击选择</div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 视图：结果 ===== -->
+<div id="view-result" class="view">
+  <div class="crown">
+    <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="#d4a843" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M2 18h20M3 8l4 4 5-7 5 7 4-4v8H3z"/>
+    </svg>
+  </div>
+  <h2>最终冠军</h2>
+  <div class="winner-name" id="winnerName"></div>
+  <div class="winner-sub" id="winnerSub"></div>
+  <div class="final-pyramid" id="finalPyramid"></div>
+  <button class="btn btn-ghost" onclick="restart()">重新开始</button>
+</div>
+
+<script>
+// ===== 状态 =====
+const state = {
+  songs: [],          // 当前轮待对决的歌曲
+  round: 0,           // 当前轮次索引
+  totalRounds: 0,     // 总轮次数
+  pairIndex: 0,       // 当前对战第几对
+  pairs: [],          // 当前轮配对 [[a,b],...]
+  byes: [],           // 当前轮轮空歌曲
+  winners: [],        // 本轮已选胜者
+  history: [],        // 每轮结束后的歌曲数组
+  tierSizes: [],      // 每层歌曲数
+  secretMode: false,  // 秘钥模式
+};
+
+// ===== 输入页 =====
+function buildInputs(){
+  const grid = document.getElementById('inputGrid');
+  grid.innerHTML = '';
+  for(let i=0;i<64;i++){
+    const wrap = document.createElement('div');
+    wrap.className = 'song-input';
+    wrap.innerHTML = `<span class="idx">${String(i+1).padStart(2,'0')}</span>
+      <input type="text" maxlength="40" placeholder="歌曲 ${i+1}" data-i="${i}">`;
+    grid.appendChild(wrap);
+  }
+  grid.querySelectorAll('input').forEach(inp=>{
+    inp.addEventListener('input', updateFillCount);
+  });
+}
+
+function getFilledSongs(){
+  const inputs = document.querySelectorAll('#inputGrid input');
+  const list = [];
+  inputs.forEach(i=>{ const v=i.value.trim(); if(v) list.push(v); });
+  return list;
+}
+
+function updateFillCount(){
+  const list = getFilledSongs();
+  const n = list.length;
+  const hint = document.getElementById('fillHint');
+  const btn = document.getElementById('confirmBtn');
+  hint.classList.remove('ok','err');
+  if(n === 0){
+    hint.textContent = '已填写 0 首';
+    btn.disabled = true;
+  } else if(n % 2 !== 0){
+    hint.textContent = `已填写 ${n} 首 — 必须为偶数，请再加 1 首或去掉 1 首`;
+    hint.classList.add('err');
+    btn.disabled = true;
+  } else {
+    hint.textContent = `已填写 ${n} 首 — 可以开始`;
+    hint.classList.add('ok');
+    btn.disabled = false;
+  }
+}
+
+const DEMO_SONGS = [
+  '请不要带我走。','我生于死去之日。','人生和只身一人的旅程。','灾厄之时。',
+  '未命名星系','我？爱？你？','再次呼唤我的名字吧。','没问Ti！',
+  '底色theory。','完？美？友！人！','心愁，就愿。','我想知道你对于幸福的定义。',
+  '芸芸','顽疾。','暂无标题。','明日未曾止息。',
+  '人立方','伊甸之蓝'
+];
+const SECRET_SONGS = [
+  '阴⬛️⬛️⬛️奇','帮⬛️⬛️，⬛️⬛️小⬛️！','启⬛️的⬛️⬛️⬛️',
+  '⬛️幕：⬛️⬛️','⬛️心⬛️⬛️针','⬛️不⬛️⬛️'
+];
+const SECRET_KEY = '麦麦旋风草莓塔';
+
+function checkSecret(){
+  const val = document.getElementById('secretInput').value.trim();
+  if(val === SECRET_KEY){
+    state.secretMode = true;
+    document.getElementById('secretStatus').style.display = 'inline';
+    document.getElementById('secretInput').style.display = 'none';
+    document.querySelector('.secret-row .secret-btn').style.display = 'none';
+  } else {
+    alert('秘钥错误');
+  }
+}
+
+function fillDemo(){
+  const list = state.secretMode ? DEMO_SONGS.concat(SECRET_SONGS) : DEMO_SONGS;
+  const inputs = document.querySelectorAll('#inputGrid input');
+  inputs.forEach((inp,i)=>{ inp.value = list[i] || ''; });
+  updateFillCount();
+}
+
+function clearAll(){
+  document.querySelectorAll('#inputGrid input').forEach(i=>i.value='');
+  updateFillCount();
+}
+
+function confirmSongs(){
+  const list = getFilledSongs();
+  if(list.length < 2){ alert('至少填写 2 首歌曲'); return; }
+  if(list.length % 2 !== 0){ alert('歌曲数量必须为偶数'); return; }
+  const set = new Set(list);
+  if(set.size < list.length){
+    if(!confirm('检测到重复歌名，是否继续？')) return;
+  }
+  state.songs = shuffle(list);
+  state.round = 0;
+  state.history = [state.songs.slice()];
+  state.tierSizes = [list.length];
+  // 计算总轮次和各层大小
+  let cur = list.length;
+  while(cur > 1){
+    cur = Math.ceil(cur / 2);
+    state.tierSizes.push(cur);
+  }
+  state.totalRounds = state.tierSizes.length - 1;
+  showPyramid();
+}
+
+// ===== 工具 =====
+function shuffle(arr){
+  const a = arr.slice();
+  for(let i=a.length-1;i>0;i--){
+    const j = Math.floor(Math.random()*(i+1));
+    [a[i],a[j]] = [a[j],a[i]];
+  }
+  return a;
+}
+
+function showView(id){
+  document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  window.scrollTo(0,0);
+}
+
+function roundName(n){
+  const cur = state.tierSizes[n] || 0;
+  const next = state.tierSizes[n+1] || 1;
+  return `${cur} 进 ${next}`;
+}
+
+// ===== 金字塔 =====
+function showPyramid(){
+  const isFinal = state.round >= state.totalRounds;
+  document.getElementById('pyramidTitle').textContent = isFinal ? '最终结果' : '晋级金字塔';
+  document.getElementById('roundInfo').textContent = isFinal ? '' :
+    `第 ${state.round+1} / ${state.totalRounds} 轮 · ${roundName(state.round)}`;
+
+  const pyr = document.getElementById('pyramid');
+  pyr.innerHTML = '';
+
+  const numTiers = state.tierSizes.length;
+  for(let tier=0; tier<numTiers; tier++){
+    const tierDiv = document.createElement('div');
+    tierDiv.className = 'tier';
+    const size = state.tierSizes[tier];
+    let songs = [];
+    let isActive = false;
+    let isWinner = false;
+
+    if(tier < state.history.length){
+      songs = state.history[tier];
+    }
+    if(tier === state.history.length - 1 && !isFinal){
+      isActive = true;
+    }
+    if(isFinal && tier === numTiers - 1){
+      isWinner = true;
+    }
+
+    const label = document.createElement('div');
+    label.className = 'tier-label';
+    label.textContent = `${size} 强`;
+    tierDiv.appendChild(label);
+
+    songs.forEach(s=>{
+      const chip = document.createElement('span');
+      chip.className = 'chip' + (isActive?' current':'') + (isWinner?' winner':'');
+      chip.textContent = s;
+      chip.title = s;
+      tierDiv.appendChild(chip);
+    });
+
+    if(isActive) tierDiv.classList.add('active');
+    pyr.appendChild(tierDiv);
+  }
+
+  const pct = state.totalRounds > 0 ? (state.round / state.totalRounds) * 100 : 0;
+  document.getElementById('progressFill').style.width = pct + '%';
+  document.getElementById('startRoundBtn').style.display = isFinal ? 'none' : '';
+  document.getElementById('byeNotice').style.display = 'none';
+  showView('view-pyramid');
+}
+
+// ===== 对战 =====
+function startBattle(){
+  const pool = shuffle(state.songs);
+  state.pairs = [];
+  state.byes = [];
+  state.winners = [];
+  state.pairIndex = 0;
+
+  // 奇数首时随机一首轮空
+  if(pool.length % 2 !== 0){
+    const byeIdx = Math.floor(Math.random() * pool.length);
+    state.byes.push(pool[byeIdx]);
+    pool.splice(byeIdx, 1);
+  }
+  for(let i=0; i<pool.length; i+=2){
+    state.pairs.push([pool[i], pool[i+1]]);
+  }
+
+  // 显示轮空提示
+  const byeNotice = document.getElementById('byeNotice');
+  if(state.byes.length > 0){
+    byeNotice.style.display = 'block';
+    byeNotice.innerHTML = `本轮 ${state.songs.length} 首为奇数，<strong>${state.byes[0]}</strong> 轮空直接晋级`;
+  } else {
+    byeNotice.style.display = 'none';
+  }
+
+  if(state.pairs.length === 0){
+    // 全部轮空（不可能，因为至少2首才会进对战）
+    finishRound();
+    return;
+  }
+  showBattle();
+}
+
+function showBattle(){
+  document.getElementById('battleRoundTag').textContent = roundName(state.round);
+  const total = state.pairs.length;
+  document.getElementById('pairCount').textContent = `第 ${state.pairIndex+1} / ${total} 场`;
+  const [a,b] = state.pairs[state.pairIndex];
+  document.getElementById('songA').textContent = a;
+  document.getElementById('songB').textContent = b;
+  showView('view-battle');
+}
+
+function pick(idx){
+  const chosen = state.pairs[state.pairIndex][idx];
+  state.winners.push(chosen);
+  state.pairIndex++;
+
+  if(state.pairIndex >= state.pairs.length){
+    finishRound();
+  } else {
+    showBattle();
+  }
+}
+
+function finishRound(){
+  // 胜者 = 轮空 + 所有对决胜者
+  const allWinners = state.byes.concat(state.winners);
+  state.songs = allWinners;
+  state.history.push(state.songs.slice());
+  state.round++;
+  if(state.round >= state.totalRounds){
+    showResult();
+  } else {
+    showPyramid();
+  }
+}
+
+// ===== 结果 =====
+function showResult(){
+  const winner = state.history[state.history.length-1][0];
+  document.getElementById('winnerName').textContent = winner;
+  const totalMatches = state.tierSizes[0] - 1;
+  document.getElementById('winnerSub').textContent = `经过 ${state.totalRounds} 轮 ${totalMatches} 场对决`;
+
+  const fp = document.getElementById('finalPyramid');
+  fp.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'pyramid';
+  wrap.style.gap = '8px';
+  const numTiers = state.tierSizes.length;
+  for(let tier=0; tier<numTiers; tier++){
+    const tierDiv = document.createElement('div');
+    tierDiv.className = 'tier';
+    const size = state.tierSizes[tier];
+    const songs = state.history[tier] || [];
+    const label = document.createElement('div');
+    label.className = 'tier-label';
+    label.textContent = `${size} 强`;
+    tierDiv.appendChild(label);
+    songs.forEach(s=>{
+      const chip = document.createElement('span');
+      chip.className = 'chip' + (tier===numTiers-1?' winner':'');
+      chip.textContent = s;
+      chip.title = s;
+      tierDiv.appendChild(chip);
+    });
+    wrap.appendChild(tierDiv);
+  }
+  fp.appendChild(wrap);
+
+  showView('view-result');
+}
+
+function restart(){
+  state.songs = [];
+  state.round = 0;
+  state.totalRounds = 0;
+  state.pairIndex = 0;
+  state.pairs = [];
+  state.byes = [];
+  state.winners = [];
+  state.history = [];
+  state.tierSizes = [];
+  state.secretMode = false;
+  document.getElementById('secretInput').value = '';
+  document.getElementById('secretInput').style.display = '';
+  document.querySelector('.secret-row .secret-btn').style.display = '';
+  document.getElementById('secretStatus').style.display = 'none';
+  showView('view-input');
+}
+
+// ===== 初始化 =====
+buildInputs();
+</script>
+</body>
+</html>
