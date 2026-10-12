@@ -4,6 +4,20 @@
 //     直到每个人只剩一首歌即结束；每轮实时向所有人公布各自的选择
 //  3) 通过 Hibernatable WebSocket 向房间内所有人实时广播最新状态
 
+// 内部接口用的 JSON 响应 / 请求体解析（供 Worker 调用 DO 的内部接口使用）
+function jsonRes(data) {
+  return new Response(JSON.stringify(data), {
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
+}
+async function bodyJson(request) {
+  try {
+    return (await request.json()) || {};
+  } catch {
+    return {};
+  }
+}
+
 export class Room {
   constructor(state, env) {
     this.state = state;
@@ -46,9 +60,10 @@ export class Room {
   // 歌曲数为奇数时，最后一个视为「轮空」(b = null) 自动晋级
   computePairs(survivors) {
     const pairs = [];
-    for (let i = 0; i < survivors.length; i += 2) {
-      if (i + 1 < survivors.length) pairs.push({ a: survivors[i], b: survivors[i + 1] });
-      else pairs.push({ a: survivors[i], b: null }); // 轮空
+    const list = survivors || [];
+    for (let i = 0; i < list.length; i += 2) {
+      if (i + 1 < list.length) pairs.push({ a: list[i], b: list[i + 1] });
+      else pairs.push({ a: list[i], b: null }); // 轮空
     }
     return pairs;
   }
@@ -81,7 +96,7 @@ export class Room {
           pick: p.picks[idx] != null ? p.picks[idx] : null,
         }));
         base.pairs = pairs;
-        base.survivorCount = p.survivors.length;
+        base.survivorCount = (p.survivors || []).length;
       }
       if (s.phase === "finished" && p.inGame) {
         base.champion = p.champion || null;
@@ -114,7 +129,7 @@ export class Room {
       name: p.name,
       online: p.online,
       inGame: p.inGame,
-      survivors: p.survivors.length,
+      survivors: (p.survivors || []).length,
       champion: p.champion ? this.songTitle(p.champion, s) : null,
     }));
     const songs = s.songs.map((x) => ({
@@ -152,7 +167,7 @@ export class Room {
     const purgeSurvivors = (songId) => {
       for (const p of Object.values(s.participants)) {
         if (!p.inGame) continue;
-        p.survivors = p.survivors.filter((x) => x !== songId);
+        p.survivors = (p.survivors || []).filter((x) => x !== songId);
         p.picks = {};
       }
     };
@@ -265,15 +280,57 @@ export class Room {
       return new Response(null, { status: 101, webSocket: client });
     }
 
+    // —— 内部接口：只由 Worker 内部调用（外部请求到不了这里，Worker 只转发 /ws 与 /state）——
+    // 之所以走 HTTP 而不是 RPC：Room 是普通类（未 extends DurableObject），RPC 调不通。
+    if (url.pathname === "/__admin/view" && (request.method === "GET" || request.method === "POST")) {
+      const name = url.searchParams.get("name") || (await bodyJson(request)).name || "";
+      return jsonRes(await this.adminView(name));
+    }
+    if (url.pathname === "/__admin/act" && request.method === "POST") {
+      const b = await bodyJson(request);
+      return jsonRes(await this.adminAction(b.name || "", b.action, b.payload || {}));
+    }
+    if (url.pathname === "/__index/register" && request.method === "POST") {
+      const b = await bodyJson(request);
+      return jsonRes(await this.registerRoom(b.name || ""));
+    }
+    if (url.pathname === "/__index/list") {
+      return jsonRes(await this.listRooms());
+    }
+
     // —— HTTP GET /state：轮询回退 & 初始加载 ——
     if (request.method === "GET" || request.method === "HEAD") {
       const s = await this.getState();
-      return new Response(JSON.stringify(this.publicView(s)), {
-        headers: { "content-type": "application/json; charset=utf-8" },
-      });
+      return jsonRes(this.publicView(s));
     }
 
     return new Response("Method Not Allowed", { status: 405 });
+  }
+
+  // ===== 房间索引（仅供保留实例 __rooms_index__ 使用）=====
+  // Workers 运行时的 DurableObjectNamespace 没有 list()，无法枚举房间；
+  // 因此每次有人进入房间时，Worker 会把房间名登记到这个索引实例里，供管理后台列出。
+  async registerRoom(name) {
+    if (!name) return { ok: false, msg: "缺少房间名" };
+    const idx = (await this.state.storage.get("index")) || {};
+    const now = Date.now();
+    // 顺手清理 7 天没出现过的房间名，避免索引无限膨胀
+    for (const k of Object.keys(idx)) {
+      if (now - (idx[k] || 0) > 7 * 24 * 60 * 60 * 1000) delete idx[k];
+    }
+    const prev = idx[name] || 0;
+    // 5 分钟内已登记过就不再写盘（同一房间的轮询/重连不会造成写放大）
+    if (now - prev < 5 * 60 * 1000) return { ok: true, cached: true };
+    idx[name] = now;
+    await this.state.storage.put("index", idx);
+    return { ok: true, count: Object.keys(idx).length };
+  }
+
+  async listRooms() {
+    const idx = (await this.state.storage.get("index")) || {};
+    const rooms = Object.entries(idx).map(([name, lastSeen]) => ({ name, lastSeen }));
+    rooms.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+    return { rooms };
   }
 
   // 新连接建立后立即把当前状态推给它

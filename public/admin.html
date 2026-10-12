@@ -92,7 +92,11 @@
     <div class="toolbar">
       <input type="search" id="filter" placeholder="过滤房间名…" oninput="renderRooms()" />
       <button class="primary" onclick="loadRooms()">刷新列表</button>
+      <div class="grow"></div>
+      <input type="text" id="lookup" placeholder="按房间名直达（列表里没有也能查）" style="max-width:250px" />
+      <button onclick="lookupRoom()">查看</button>
     </div>
+    <div class="badge" id="pingInfo"></div>
     <table id="roomsTable">
       <thead><tr><th>房间名</th><th>阶段</th><th>在线/总数</th><th>歌曲</th><th>轮次</th><th>操作</th></tr></thead>
       <tbody id="roomsBody"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
@@ -148,6 +152,39 @@ function api(path, opts = {}) {
   return fetch(u.toString(), opts);
 }
 
+// 调用接口并解析 JSON；非 2xx 时抛出后端给出的具体原因（而不是只有「HTTP 500」）
+async function apiJson(path, opts = {}) {
+  const r = await api(path, opts);
+  let j = null;
+  try {
+    j = await r.json();
+  } catch {}
+  if (!r.ok) {
+    const msg = j && (j.message || j.error || j.msg);
+    throw new Error(msg || "HTTP " + r.status);
+  }
+  return j;
+}
+
+async function ping() {
+  const el = document.getElementById("pingInfo");
+  try {
+    const j = await apiJson("/admin/api/ping");
+    el.textContent =
+      "索引房间 " + j.indexedRooms + " 个" + (j.indexOk ? "" : "（索引异常：" + (j.indexErr || "未知") + "）");
+  } catch (e) {
+    el.textContent = "自检失败：" + (e.message || e);
+  }
+}
+
+async function lookupRoom() {
+  const v = document.getElementById("lookup").value.trim();
+  if (!v) return;
+  try {
+    await openDetail(v);
+  } catch {}
+}
+
 async function doLogin() {
   const v = document.getElementById("tokenInput").value.trim();
   if (!v) return;
@@ -157,11 +194,18 @@ async function doLogin() {
   try {
     const r = await api("/admin/api/rooms");
     if (r.status === 403) throw new Error("令牌无效或未配置 ADMIN_TOKEN");
-    if (!r.ok) throw new Error("HTTP " + r.status);
+    if (!r.ok) {
+      let j = null;
+      try {
+        j = await r.json();
+      } catch {}
+      throw new Error((j && (j.message || j.error)) || "HTTP " + r.status);
+    }
     localStorage.setItem(K, TOKEN);
     loginBox.classList.add("hidden");
     app.classList.remove("hidden");
     loadRooms();
+    ping();
   } catch (e) {
     err.textContent = e.message || "登录失败";
     err.classList.remove("hidden");
@@ -191,11 +235,11 @@ async function loadRooms() {
   const body = document.getElementById("roomsBody");
   body.innerHTML = '<tr><td colspan="6" class="muted">加载中…</td></tr>';
   try {
-    const r = await api("/admin/api/rooms");
-    ROOMS = await r.json();
+    const j = await apiJson("/admin/api/rooms");
+    ROOMS = Array.isArray(j) ? j : [];
     renderRooms();
   } catch (e) {
-    body.innerHTML = '<tr><td colspan="6" class="err">加载失败：' + (e.message || e) + "</td></tr>";
+    body.innerHTML = '<tr><td colspan="6" class="err">加载失败：' + esc(e.message || e) + "</td></tr>";
   }
 }
 
@@ -227,8 +271,7 @@ async function openDetail(name) {
   d.classList.remove("hidden");
   document.getElementById("detailMsg").classList.add("hidden");
   try {
-    const r = await api("/admin/api/rooms/" + encodeURIComponent(name));
-    const x = await r.json();
+    const x = await apiJson("/admin/api/rooms/" + encodeURIComponent(name));
     document.getElementById("detailTitle").textContent = "房间：" + x.name;
     document.getElementById("detailPhase").textContent =
       x.phase === "playing" ? "进行中" : x.phase === "finished" ? "已结束" : "收集中";
@@ -279,17 +322,31 @@ function closeDetail() {
   document.getElementById("detail").classList.add("hidden");
 }
 
+// 统一的「操作」调用：始终返回 {ok,msg}，不因非 JSON 响应而崩
+async function postAction(payload) {
+  const r = await api("/admin/api/rooms/" + encodeURIComponent(current) + "/action", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  let j = null;
+  try {
+    j = await r.json();
+  } catch {}
+  if (!j || typeof j !== "object") j = { ok: false, msg: "HTTP " + r.status };
+  return j;
+}
+
+function failMsg(j) {
+  return j.msg || j.error || j.message || "未知错误";
+}
+
 async function act(action) {
   if (!current) return;
   if (action === "wipe" && !confirm("确认彻底清空房间「" + current + "」？此操作会删除歌单和所有参与者。")) return;
   if (action === "clear_songs" && !confirm("确认清空房间「" + current + "」的歌单并回到收集阶段？")) return;
-  const r = await api("/admin/api/rooms/" + encodeURIComponent(current) + "/action", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action }),
-  });
-  const j = await r.json();
-  flash(j.ok ? "操作成功：" + action : "失败：" + (j.msg || ""), j.ok);
+  const j = await postAction({ action });
+  flash(j.ok ? "操作成功：" + action : "失败：" + failMsg(j), j.ok);
   if (j.ok) {
     loadRooms();
     openDetail(current);
@@ -297,38 +354,23 @@ async function act(action) {
 }
 
 async function removeSong(id) {
-  const r = await api("/admin/api/rooms/" + encodeURIComponent(current) + "/action", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action: "remove_song", songId: id }),
-  });
-  const j = await r.json();
-  flash(j.ok ? "已删除歌曲" : "失败：" + (j.msg || ""), j.ok);
+  const j = await postAction({ action: "remove_song", songId: id });
+  flash(j.ok ? "已删除歌曲" : "失败：" + failMsg(j), j.ok);
   if (j.ok) openDetail(current);
 }
 
 async function removePart(pid) {
   if (!confirm("确认将该参与者移出房间？")) return;
-  const r = await api("/admin/api/rooms/" + encodeURIComponent(current) + "/action", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action: "remove_participant", pid }),
-  });
-  const j = await r.json();
-  flash(j.ok ? "已移除参与者" : "失败：" + (j.msg || ""), j.ok);
+  const j = await postAction({ action: "remove_participant", pid });
+  flash(j.ok ? "已移除参与者" : "失败：" + failMsg(j), j.ok);
   if (j.ok) openDetail(current);
 }
 
 async function sendNotice() {
   const t = document.getElementById("noticeText").value.trim();
   if (!t) return;
-  const r = await api("/admin/api/rooms/" + encodeURIComponent(current) + "/action", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action: "notice", text: t }),
-  });
-  const j = await r.json();
-  flash(j.ok ? "通知已广播" : "失败：" + (j.msg || ""), j.ok);
+  const j = await postAction({ action: "notice", text: t });
+  flash(j.ok ? "通知已广播" : "失败：" + failMsg(j), j.ok);
   if (j.ok) {
     document.getElementById("noticeText").value = "";
     openDetail(current);
@@ -361,6 +403,7 @@ if (TOKEN) {
         loginBox.classList.add("hidden");
         app.classList.remove("hidden");
         loadRooms();
+        ping();
         return;
       }
     } catch {}

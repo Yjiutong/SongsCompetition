@@ -139,12 +139,15 @@ function send(obj) {
 // 轮询回退：WebSocket 临时不可用时仍能同步状态
 function startPoll() {
   clearInterval(pollTimer);
+  let first = true; // 首次轮询顺带把房间登记进索引（供管理后台列出），之后不再带
   pollTimer = setInterval(async () => {
     if (ws && ws.readyState === WebSocket.OPEN) return;
     const room = getRoom();
     if (!room) return;
     try {
-      const r = await fetch("/state?room=" + encodeURIComponent(room));
+      const reg = first ? "&reg=1" : "";
+      first = false;
+      const r = await fetch("/state?room=" + encodeURIComponent(room) + reg);
       if (r.ok) {
         state = await r.json();
         render();
