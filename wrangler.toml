@@ -14,9 +14,10 @@ name = "ROOM"
 class_name = "Room"
 
 # 首次部署需要这个 migration 来注册 Room 类
+# 免费套餐必须用 new_sqlite_classes 创建命名空间（[code: 10097]）
 [[migrations]]
 tag = "v1"
-new_classes = ["Room"]
+new_sqlite_classes = ["Room"]
 
 # 如需固定账号，可取消下面一行注释并填入你的 Cloudflare Account ID
 # account_id = "your-account-id"
