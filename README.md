@@ -22,6 +22,7 @@
 - **实时更新**：基于 Cloudflare Durable Object 的 Hibernatable WebSocket，状态变更秒级广播；WebSocket 断线时自动回退 HTTP 轮询。
 - **缓存清除（网页）**：Worker 对所有页面静态资源（`/`、`index.html`、`app.js`、`style.css` 等）返回 `Cache-Control: no-cache`，发布新版本后浏览器/边缘不会一直用旧脚本；房间内还提供「清除缓存」按钮，一键带时间戳刷新强制拉取最新页面。
 - **空闲自动清理（房间）**：某个房间内**最后一人离开后 30 分钟仍无人在线**，Durable Object 会通过 Alarm 自动清除该房间的**歌单缓存**并重置对局，避免空房间长期占用存储；只要 30 分钟内有人回来，清理即被自动取消。
+- **管理员后台**：访问 `/admin` 并输入 `ADMIN_TOKEN` 可查看并管控**所有房间**——列出每个房间的阶段 / 在线人数 / 歌单数，进入单个房间后可移除歌曲、移除参与者、重置对局、清空歌单、彻底清空房间，并向房间内所有人广播通知。令牌以 Cloudflare Secret 形式配置，绝不出现在前端代码中。
 - **零运维**：纯静态前端 + 一个 Worker，数据存在 Cloudflare 边缘，免费额度足够小中型聚会使用。
 
 ## 技术架构（纯 Cloudflare）
@@ -38,7 +39,7 @@
 ```
 
 - **前端**：`public/` 下的静态文件，由 Workers Static Assets 直接托管。
-- **Worker**（`src/index.js`）：路由 `/ws`（WebSocket 实时通道）与 `/state`（HTTP 轮询回退）到对应房间的 Durable Object，其余路径回退静态资源。
+- **Worker**（`src/index.js`）：路由 `/ws`（WebSocket 实时通道）、`/state`（HTTP 轮询回退）、`/admin`（后台页面）与 `/admin/api/*`（后台数据接口，需 `ADMIN_TOKEN`）到对应房间的 Durable Object，其余路径回退静态资源。
 - **Durable Object**（`src/room.js`，类名 `Room`）：每个房间一个实例，持有状态并通过 Hibernatable WebSocket 实时广播。
 
 ## 目录结构
@@ -53,7 +54,8 @@
 ├── public/                # 前端静态资源（部署后即为站点根）
 │   ├── index.html
 │   ├── style.css
-│   └── app.js
+│   ├── app.js
+│   └── admin.html         # 管理员后台页面（数据接口需 ADMIN_TOKEN）
 └── legacy/
     └── SongsCompetition.html   # 原单机版（不参与部署）
 ```
@@ -106,6 +108,40 @@ pages_build_output_dir = "public"
 ```
 
 其余配置与代码不变，在 Pages 的「连接 Git」流程中把 **Build output directory** 设为 `public` 即可。
+
+## 管理员后台
+
+后台入口：`https://<你的域名>/admin`（或 `https://songs-competition.<子域>.workers.dev/admin`）。
+
+### 配置管理员令牌（必须）
+
+后台接口受 `ADMIN_TOKEN` 保护。未配置该变量时，所有 `/admin/api/*` 返回 `403`。请把令牌以 **Secret**（而非明文环境变量）的形式配置，避免泄露：
+
+- **通过 Git 部署（控制台）**：应用详情 **Settings → Variables and Secrets → Add**，
+  类型选 **Secret**，名称 `ADMIN_TOKEN`，值填一段你自己设定的随机字符串（如 `openssl rand -hex 16` 生成）。
+- **本地开发**：在仓库根目录建 `.dev.vars`（已被 `.gitignore` 忽略），写入：
+  ```ini
+  ADMIN_TOKEN=你自定义的令牌
+  ```
+  然后用 `npx wrangler dev` 本地起服务时即可用该令牌登录后台。
+
+> 切勿把真实 `ADMIN_TOKEN` 写进 `wrangler.toml` 或提交到 Git 仓库。
+
+### 可以做什么
+
+1. **房间列表**：展示所有存在过的房间（按 Durable Object 命名空间枚举），含阶段、在线/总数、歌单数、轮次，支持按房间名过滤与一键刷新。
+2. **进入单个房间**后：
+   - **参与者管理**：查看每位参与者的在线状态、是否参赛、剩余歌曲数、冠军歌；可一键「移除参与者」。
+   - **歌单管理**：查看全部歌曲（歌名 / 歌手 / 添加者），可一键「删除歌曲」（删除会同步从每个人的幸存列表与选择中剔除）。
+   - **房间操作**：`重置对局（保留歌单）` / `清空歌单` / `彻底清空房间（含参与者）`。
+   - **广播通知**：向房间内所有人推送一条短通知（实时出现在房间状态里）。
+
+所有操作都会**实时广播**给房间内正在连接的客户端。
+
+### 安全说明
+
+- 后台页面 `admin.html` 本身只是前端外壳，所有数据接口都要求正确的 `ADMIN_TOKEN`，无令牌时拿不到任何房间信息。
+- 令牌即后台的访问凭证，请妥善保管；怀疑泄露时在 Cloudflare 后台重置 Secret 即可立即失效。
 
 ## 使用说明
 

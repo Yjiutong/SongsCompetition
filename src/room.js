@@ -90,6 +90,7 @@ export class Room {
     });
     return {
       phase: s.phase,
+      notice: s.notice || null,
       currentRound: s.currentRound,
       totalRounds: s.totalRounds,
       roundComplete: s.roundComplete,
@@ -97,6 +98,145 @@ export class Room {
       inGameCount: inGame.length,
       participants,
     };
+  }
+
+  // ===== 管理员视图 / 操作（由 Worker 的 /admin/api 调用）=====
+  songTitle(id, s) {
+    const x = s.songs.find((y) => y.id === id);
+    return x ? (x.artist ? `${x.title} - ${x.artist}` : x.title) : id;
+  }
+
+  // 管理员后台看的房间摘要：参与者、歌单、阶段、计数
+  async adminView(name) {
+    const s = await this.getState();
+    const participants = Object.values(s.participants).map((p) => ({
+      id: p.id,
+      name: p.name,
+      online: p.online,
+      inGame: p.inGame,
+      survivors: p.survivors.length,
+      champion: p.champion ? this.songTitle(p.champion, s) : null,
+    }));
+    const songs = s.songs.map((x) => ({
+      id: x.id,
+      title: x.title,
+      artist: x.artist,
+      addedBy: x.addedBy,
+    }));
+    return {
+      name,
+      phase: s.phase,
+      notice: s.notice || null,
+      currentRound: s.currentRound,
+      totalRounds: s.totalRounds,
+      roundComplete: s.roundComplete,
+      songCount: songs.length,
+      onlineCount: participants.filter((p) => p.online).length,
+      participantCount: participants.length,
+      songs,
+      participants,
+    };
+  }
+
+  // 管理员对房间执行的操作：移除歌曲 / 移除参与者 / 清空歌单 / 重置 / 彻底清空 / 广播通知
+  async adminAction(name, action, payload = {}) {
+    const s = await this.getState();
+    let ok = true;
+    let msg = "ok";
+
+    const recomputeRoundComplete = () => {
+      const inGame = Object.values(s.participants).filter((p) => p.inGame);
+      s.roundComplete =
+        inGame.length > 0 && inGame.every((p) => this.hasPickedAll(s, p));
+    };
+    const purgeSurvivors = (songId) => {
+      for (const p of Object.values(s.participants)) {
+        if (!p.inGame) continue;
+        p.survivors = p.survivors.filter((x) => x !== songId);
+        p.picks = {};
+      }
+    };
+
+    switch (action) {
+      case "remove_song": {
+        const id = payload.songId;
+        if (!id || !s.songs.some((x) => x.id === id)) {
+          ok = false;
+          msg = "歌曲不存在";
+          break;
+        }
+        s.songs = s.songs.filter((x) => x.id !== id);
+        purgeSurvivors(id); // 同步从每个人的幸存列表/选择里剔除
+        if (s.phase === "playing") s.roundComplete = false;
+        break;
+      }
+      case "remove_participant": {
+        const pid = payload.pid;
+        if (!pid || !s.participants[pid]) {
+          ok = false;
+          msg = "参与者不存在";
+          break;
+        }
+        delete s.participants[pid];
+        if (s.phase === "playing") recomputeRoundComplete();
+        break;
+      }
+      case "clear_songs": {
+        // 清空歌单并回到收集阶段，保留参与者
+        s.songs = [];
+        s.phase = "collecting";
+        s.currentRound = 0;
+        s.totalRounds = 0;
+        s.roundComplete = false;
+        for (const p of Object.values(s.participants)) {
+          p.inGame = true;
+          p.survivors = [];
+          p.picks = {};
+          p.champion = null;
+        }
+        break;
+      }
+      case "reset": {
+        // 保留歌单，回到收集阶段，清空战绩（与客户端「再来一局」一致）
+        s.phase = "collecting";
+        s.currentRound = 0;
+        s.totalRounds = 0;
+        s.roundComplete = false;
+        for (const p of Object.values(s.participants)) {
+          p.inGame = true;
+          p.survivors = [];
+          p.picks = {};
+          p.champion = null;
+        }
+        break;
+      }
+      case "wipe": {
+        // 彻底清空整个房间（含参与者与歌单）
+        s.songs = [];
+        s.phase = "collecting";
+        s.currentRound = 0;
+        s.totalRounds = 0;
+        s.roundComplete = false;
+        s.participants = {};
+        s.emptySince = null;
+        s.notice = null;
+        this.cancelEviction();
+        break;
+      }
+      case "notice": {
+        s.notice = String(payload.text || "").slice(0, 200) || null;
+        break;
+      }
+      default:
+        ok = false;
+        msg = "未知操作";
+    }
+
+    if (ok) {
+      await this.state.storage.put("state", s);
+      await this.broadcast(s); // 实时推送给房间内所有人
+    }
+    return { ok, msg };
   }
 
   // 向房间内所有 WebSocket 客户端广播

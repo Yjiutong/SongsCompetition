@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>房间管理后台 · 歌曲淘汰赛</title>
+<style>
+  :root{
+    --bg:#0e0c08; --panel:#181410; --panel2:#221c14; --gold:#e7c66b;
+    --gold-soft:#caa64a; --text:#f3ead6; --muted:#a99c82; --line:#332a1d;
+    --green:#4caf50; --red:#e0584f; --blue:#5aa9e6;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    background:radial-gradient(1200px 600px at 50% -10%,#241d12,var(--bg));
+    color:var(--text);min-height:100vh}
+  .wrap{max-width:1080px;margin:0 auto;padding:24px 18px 64px}
+  h1{font-size:22px;color:var(--gold);letter-spacing:1px;margin:0}
+  .top{display:flex;align-items:center;justify-content:space-between;gap:12px;
+    padding-bottom:14px;border-bottom:1px solid var(--line);margin-bottom:20px}
+  .top .sub{color:var(--muted);font-size:13px}
+  button{font-family:inherit;cursor:pointer;border:1px solid var(--line);
+    background:var(--panel2);color:var(--text);border-radius:8px;padding:7px 12px;
+    font-size:13px;transition:.15s}
+  button:hover{border-color:var(--gold-soft)}
+  button.primary{background:linear-gradient(180deg,#f0d27e,#caa64a);color:#231a08;
+    border-color:#caa64a;font-weight:700}
+  button.danger{color:#ffd9d5;border-color:#5a2a26}
+  button.danger:hover{background:#3a1c19}
+  button.tiny{padding:4px 9px;font-size:12px}
+  input[type=text],input[type=password],input[type=search]{font-family:inherit;background:#0d0b07;
+    border:1px solid var(--line);color:var(--text);border-radius:8px;padding:8px 10px;font-size:14px;width:100%}
+  input:focus{outline:none;border-color:var(--gold-soft)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:16px 16px;margin-bottom:16px}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px}
+  td .acts{display:flex;gap:6px;flex-wrap:wrap}
+  .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;border:1px solid var(--line)}
+  .pill.on{color:var(--green);border-color:#2e5a32}
+  .pill.off{color:var(--muted)}
+  .pill.play{color:var(--gold);border-color:var(--gold-soft)}
+  .pill.fin{color:var(--blue);border-color:#2c4a63}
+  .pill.col{color:var(--muted)}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);margin-right:6px}
+  .dot.on{background:var(--green);box-shadow:0 0 6px var(--green)}
+  .muted{color:var(--muted)}
+  .err{color:var(--red);font-size:13px;margin-top:8px}
+  .ok{color:var(--green);font-size:13px;margin-top:8px}
+  /* 登录遮罩 */
+  #login{position:fixed;inset:0;background:rgba(8,6,3,.92);display:flex;
+    align-items:center;justify-content:center;z-index:50}
+  #login .box{width:340px;background:var(--panel);border:1px solid var(--line);
+    border-radius:14px;padding:26px}
+  #login h2{margin:0 0 6px;color:var(--gold);font-size:18px}
+  #login p{color:var(--muted);font-size:12.5px;margin:0 0 16px;line-height:1.5}
+  .hidden{display:none!important}
+  .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+  .toolbar .grow{flex:1}
+  .notice-row{display:flex;gap:8px;margin-top:10px}
+  .badge{font-size:11px;color:var(--muted);border:1px solid var(--line);
+    border-radius:6px;padding:2px 7px}
+  @media(max-width:640px){th,td{padding:7px 6px}.acts button{margin-bottom:4px}}
+</style>
+</head>
+<body>
+
+<!-- 登录遮罩 -->
+<div id="login">
+  <div class="box">
+    <h2>房间管理后台</h2>
+    <p>输入管理员令牌（ADMIN_TOKEN）进入。令牌在 Cloudflare 后台以 Secret 形式配置，不会出现在前端代码里。</p>
+    <input type="password" id="tokenInput" placeholder="ADMIN_TOKEN" autocomplete="off" />
+    <button class="primary" id="loginBtn" style="width:100%;margin-top:14px">进入后台</button>
+    <div class="err hidden" id="loginErr"></div>
+  </div>
+</div>
+
+<div class="wrap hidden" id="app">
+  <div class="top">
+    <div>
+      <h1>房间管理后台</h1>
+      <div class="sub">管控所有房间的参与者与歌单 · 数据实时同步</div>
+    </div>
+    <div>
+      <button onclick="logout()">退出</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="toolbar">
+      <input type="search" id="filter" placeholder="过滤房间名…" oninput="renderRooms()" />
+      <button class="primary" onclick="loadRooms()">刷新列表</button>
+    </div>
+    <table id="roomsTable">
+      <thead><tr><th>房间名</th><th>阶段</th><th>在线/总数</th><th>歌曲</th><th>轮次</th><th>操作</th></tr></thead>
+      <tbody id="roomsBody"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+    </table>
+  </div>
+
+  <div id="detail" class="card hidden">
+    <div class="toolbar">
+      <h2 style="margin:0;color:var(--gold);font-size:17px" id="detailTitle">房间</h2>
+      <span class="badge" id="detailPhase"></span>
+      <span class="badge" id="detailNotice"></span>
+      <div class="grow"></div>
+      <button onclick="closeDetail()">关闭</button>
+    </div>
+
+    <div class="toolbar">
+      <button onclick="act('reset')">重置对局（保留歌单）</button>
+      <button onclick="act('clear_songs')">清空歌单</button>
+      <button class="danger" onclick="act('wipe')">彻底清空房间</button>
+    </div>
+    <div class="notice-row">
+      <input type="text" id="noticeText" placeholder="向房间内所有人广播一条通知…" maxlength="200" />
+      <button onclick="sendNotice()">广播</button>
+    </div>
+    <div class="ok hidden" id="detailMsg"></div>
+
+    <h3 style="color:var(--muted);font-size:13px;margin:18px 0 6px">参与者</h3>
+    <table id="partsTable">
+      <thead><tr><th>昵称</th><th>状态</th><th>参赛</th><th>剩几首</th><th>冠军歌</th><th>操作</th></tr></thead>
+      <tbody id="partsBody"></tbody>
+    </table>
+
+    <h3 style="color:var(--muted);font-size:13px;margin:18px 0 6px">歌单</h3>
+    <table id="songsTable">
+      <thead><tr><th>歌名</th><th>歌手</th><th>添加者</th><th>操作</th></tr></thead>
+      <tbody id="songsBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const K = "sc_admin_token";
+let TOKEN = localStorage.getItem(K) || "";
+let ROOMS = [];
+let current = null;
+
+const loginBox = document.getElementById("login");
+const app = document.getElementById("app");
+
+function api(path, opts = {}) {
+  const u = new URL(path, location.origin);
+  u.searchParams.set("token", TOKEN);
+  return fetch(u.toString(), opts);
+}
+
+async function doLogin() {
+  const v = document.getElementById("tokenInput").value.trim();
+  if (!v) return;
+  TOKEN = v;
+  const err = document.getElementById("loginErr");
+  err.classList.add("hidden");
+  try {
+    const r = await api("/admin/api/rooms");
+    if (r.status === 403) throw new Error("令牌无效或未配置 ADMIN_TOKEN");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    localStorage.setItem(K, TOKEN);
+    loginBox.classList.add("hidden");
+    app.classList.remove("hidden");
+    loadRooms();
+  } catch (e) {
+    err.textContent = e.message || "登录失败";
+    err.classList.remove("hidden");
+  }
+}
+
+function logout() {
+  localStorage.removeItem(K);
+  TOKEN = "";
+  app.classList.add("hidden");
+  document.getElementById("detail").classList.add("hidden");
+  loginBox.classList.remove("hidden");
+}
+
+document.getElementById("loginBtn").onclick = doLogin;
+document.getElementById("tokenInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") doLogin();
+});
+
+function phasePill(ph) {
+  if (ph === "playing") return '<span class="pill play">进行中</span>';
+  if (ph === "finished") return '<span class="pill fin">已结束</span>';
+  return '<span class="pill col">收集中</span>';
+}
+
+async function loadRooms() {
+  const body = document.getElementById("roomsBody");
+  body.innerHTML = '<tr><td colspan="6" class="muted">加载中…</td></tr>';
+  try {
+    const r = await api("/admin/api/rooms");
+    ROOMS = await r.json();
+    renderRooms();
+  } catch (e) {
+    body.innerHTML = '<tr><td colspan="6" class="err">加载失败：' + (e.message || e) + "</td></tr>";
+  }
+}
+
+function renderRooms() {
+  const f = (document.getElementById("filter").value || "").trim().toLowerCase();
+  const body = document.getElementById("roomsBody");
+  const list = ROOMS.filter((x) => !f || (x.name || "").toLowerCase().includes(f));
+  if (!list.length) {
+    body.innerHTML = '<tr><td colspan="6" class="muted">没有匹配的房间</td></tr>';
+    return;
+  }
+  body.innerHTML = list
+    .map(
+      (x) => `<tr>
+      <td>${esc(x.name)}</td>
+      <td>${phasePill(x.phase)}</td>
+      <td><span class="dot ${x.onlineCount > 0 ? "on" : ""}"></span>${x.onlineCount}/${x.participantCount}</td>
+      <td>${x.songCount}</td>
+      <td>${x.phase === "playing" ? x.currentRound + 1 + "/" + (x.totalRounds || "?") : "-"}</td>
+      <td><button class="tiny" onclick="openDetail('${enc(x.name)}')">查看 / 管理</button></td>
+    </tr>`,
+    )
+    .join("");
+}
+
+async function openDetail(name) {
+  current = name;
+  const d = document.getElementById("detail");
+  d.classList.remove("hidden");
+  document.getElementById("detailMsg").classList.add("hidden");
+  try {
+    const r = await api("/admin/api/rooms/" + encodeURIComponent(name));
+    const x = await r.json();
+    document.getElementById("detailTitle").textContent = "房间：" + x.name;
+    document.getElementById("detailPhase").textContent =
+      x.phase === "playing" ? "进行中" : x.phase === "finished" ? "已结束" : "收集中";
+    const nb = document.getElementById("detailNotice");
+    nb.textContent = x.notice ? "通知：" + x.notice : "";
+    nb.style.display = x.notice ? "" : "none";
+
+    const pb = document.getElementById("partsBody");
+    if (!x.participants.length) {
+      pb.innerHTML = '<tr><td colspan="6" class="muted">暂无参与者</td></tr>';
+    } else {
+      pb.innerHTML = x.participants
+        .map(
+          (p) => `<tr>
+          <td>${esc(p.name)}</td>
+          <td>${p.online ? '<span class="pill on">在线</span>' : '<span class="pill off">离线</span>'}</td>
+          <td>${p.inGame ? "是" : "否"}</td>
+          <td>${p.survivors}</td>
+          <td>${esc(p.champion || "-")}</td>
+          <td><button class="tiny danger" onclick="removePart('${p.id}')">移除</button></td>
+        </tr>`,
+        )
+        .join("");
+    }
+
+    const sb = document.getElementById("songsBody");
+    if (!x.songs.length) {
+      sb.innerHTML = '<tr><td colspan="4" class="muted">暂无歌曲</td></tr>';
+    } else {
+      sb.innerHTML = x.songs
+        .map(
+          (s) => `<tr>
+          <td>${esc(s.title)}</td>
+          <td>${esc(s.artist || "-")}</td>
+          <td class="muted">${esc((s.addedBy || "").slice(0, 8))}</td>
+          <td><button class="tiny danger" onclick="removeSong('${s.id}')">删除</button></td>
+        </tr>`,
+        )
+        .join("");
+    }
+  } catch (e) {
+    flash("加载房间详情失败：" + (e.message || e), false);
+  }
+}
+
+function closeDetail() {
+  current = null;
+  document.getElementById("detail").classList.add("hidden");
+}
+
+async function act(action) {
+  if (!current) return;
+  if (action === "wipe" && !confirm("确认彻底清空房间「" + current + "」？此操作会删除歌单和所有参与者。")) return;
+  if (action === "clear_songs" && !confirm("确认清空房间「" + current + "」的歌单并回到收集阶段？")) return;
+  const r = await api("/admin/api/rooms/" + encodeURIComponent(current) + "/action", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action }),
+  });
+  const j = await r.json();
+  flash(j.ok ? "操作成功：" + action : "失败：" + (j.msg || ""), j.ok);
+  if (j.ok) {
+    loadRooms();
+    openDetail(current);
+  }
+}
+
+async function removeSong(id) {
+  const r = await api("/admin/api/rooms/" + encodeURIComponent(current) + "/action", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "remove_song", songId: id }),
+  });
+  const j = await r.json();
+  flash(j.ok ? "已删除歌曲" : "失败：" + (j.msg || ""), j.ok);
+  if (j.ok) openDetail(current);
+}
+
+async function removePart(pid) {
+  if (!confirm("确认将该参与者移出房间？")) return;
+  const r = await api("/admin/api/rooms/" + encodeURIComponent(current) + "/action", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "remove_participant", pid }),
+  });
+  const j = await r.json();
+  flash(j.ok ? "已移除参与者" : "失败：" + (j.msg || ""), j.ok);
+  if (j.ok) openDetail(current);
+}
+
+async function sendNotice() {
+  const t = document.getElementById("noticeText").value.trim();
+  if (!t) return;
+  const r = await api("/admin/api/rooms/" + encodeURIComponent(current) + "/action", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "notice", text: t }),
+  });
+  const j = await r.json();
+  flash(j.ok ? "通知已广播" : "失败：" + (j.msg || ""), j.ok);
+  if (j.ok) {
+    document.getElementById("noticeText").value = "";
+    openDetail(current);
+  }
+}
+
+function flash(msg, ok) {
+  const el = document.getElementById("detailMsg");
+  el.textContent = msg;
+  el.className = ok ? "ok" : "err";
+}
+
+function esc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+function enc(s) {
+  return encodeURIComponent(s);
+}
+
+// 启动：若已存令牌则尝试直接进入
+if (TOKEN) {
+  (async () => {
+    try {
+      const r = await api("/admin/api/rooms");
+      if (r.ok) {
+        loginBox.classList.add("hidden");
+        app.classList.remove("hidden");
+        loadRooms();
+        return;
+      }
+    } catch {}
+    localStorage.removeItem(K);
+    TOKEN = "";
+  })();
+}
+</script>
+</body>
+</html>
