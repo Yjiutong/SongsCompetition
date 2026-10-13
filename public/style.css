@@ -112,7 +112,23 @@ h1,h2,h3,.serif{font-family:"Songti SC","STSong","SimSun","Noto Serif SC",serif}
 .person.me{border-color:rgba(212,168,67,.5)}
 .dot{width:8px;height:8px;border-radius:50%;background:#555;flex:none}
 .dot.online{background:var(--win);box-shadow:0 0 6px rgba(74,222,128,.6)}
-.person-name{font-size:14px;font-weight:500}
+.person-name{font-size:14px;font-weight:500;flex:1;min-width:0}
+.badges{display:flex;gap:6px;flex:none}
+.badge{font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid var(--line);color:var(--text-dim)}
+.badge-host{color:var(--gold);border-color:rgba(212,168,67,.5);background:rgba(212,168,67,.1)}
+.badge-ready{color:var(--win);border-color:rgba(74,222,128,.4);background:rgba(74,222,128,.08)}
+.host-badge{font-size:12px;padding:5px 12px;border-radius:20px;color:var(--gold);border:1px solid rgba(212,168,67,.5);background:rgba(212,168,67,.1)}
+.notice-bar{
+  background:rgba(212,168,67,.12);border:1px solid rgba(212,168,67,.4);
+  color:var(--gold-soft);border-radius:10px;padding:10px 16px;font-size:13px;margin-bottom:18px;
+}
+.tool-btns{display:flex;gap:8px;flex-wrap:wrap}
+.host-settings{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:12px}
+.setting{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-dim)}
+.setting select{
+  background:var(--bg-soft);border:1px solid var(--line);border-radius:6px;
+  color:var(--text);font-size:13px;padding:6px 8px;font-family:inherit;
+}
 
 /* ===== 淘汰赛：轮次条 ===== */
 .round-bar{
@@ -121,8 +137,18 @@ h1,h2,h3,.serif{font-family:"Songti SC","STSong","SimSun","Noto Serif SC",serif}
   padding:14px 20px;margin-bottom:18px;
 }
 .round-no{font-family:"Songti SC","STSong","SimSun","Noto Serif SC",serif;font-size:18px;font-weight:700;color:var(--gold)}
-.round-status{font-size:13px;color:var(--text-dim)}
+.round-status{font-size:13px;color:var(--text-dim);flex:1;min-width:160px}
 .round-status.done{color:var(--win)}
+.round-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.round-timer{font-size:13px;color:var(--text-dim);font-variant-numeric:tabular-nums;min-width:64px}
+.round-timer.urgent{color:#f87171;font-weight:600}
+.behind-notice{
+  background:rgba(96,165,250,.1);border:1px solid rgba(96,165,250,.35);color:var(--bye);
+  border-radius:10px;padding:10px 16px;font-size:13px;margin-bottom:14px;
+}
+.event-notice{font-size:12px;color:var(--text-dim);margin-bottom:14px}
+.waiting-bar{margin-top:4px}
+.champ-line{font-size:15px;color:var(--gold-soft);padding:20px 0}
 
 /* ===== 对阵卡片 ===== */
 .pairs{display:flex;flex-direction:column;gap:14px}
@@ -164,7 +190,67 @@ h1,h2,h3,.serif{font-family:"Songti SC","STSong","SimSun","Noto Serif SC",serif}
   background:rgba(212,168,67,.16);color:var(--gold-soft);border-color:rgba(212,168,67,.4);font-weight:500;
 }
 .pick-chip.bye-chip{background:rgba(96,165,250,.12);color:var(--bye);border-color:rgba(96,165,250,.3)}
+.pick-chip.hidden-chip{background:rgba(138,134,152,.08);color:var(--text-dim);border-style:dashed}
+.pick-chip.champ-chip{background:rgba(212,168,67,.18);color:var(--gold-soft);border-color:rgba(212,168,67,.5);font-weight:600}
 .pick-empty{font-size:12px;color:var(--text-dim)}
+.round-tag{font-size:11px;color:var(--bye);background:rgba(96,165,250,.12);border-radius:10px;padding:2px 8px;flex:none}
+
+/* ===== 弹窗（曲库 / 导入）===== */
+.modal-mask{
+  position:fixed;inset:0;background:rgba(0,0,0,.66);z-index:100;
+  display:flex;align-items:center;justify-content:center;padding:20px;
+}
+.modal{
+  background:var(--card);border:1px solid var(--line);border-radius:14px;
+  width:100%;max-width:640px;max-height:86vh;display:flex;flex-direction:column;
+  padding:20px;gap:14px;
+}
+.modal-head{display:flex;justify-content:space-between;align-items:center}
+.modal-head h3{font-size:17px}
+.modal-close{background:transparent;border:none;color:var(--text-dim);font-size:22px;cursor:pointer;line-height:1;padding:2px 8px}
+.modal-close:hover{color:var(--text)}
+
+/* 曲库 */
+.lib-body{display:grid;grid-template-columns:150px 1fr;gap:14px;min-height:280px;flex:1}
+.lib-artists{display:flex;flex-direction:column;gap:4px;overflow-y:auto;max-height:52vh;padding-right:4px}
+.lib-artist{
+  text-align:left;background:transparent;border:1px solid transparent;border-radius:8px;
+  color:var(--text-dim);font-size:13px;padding:8px 10px;cursor:pointer;font-family:inherit;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.lib-artist:hover{color:var(--text);background:var(--bg-soft)}
+.lib-artist.active{color:var(--gold);border-color:rgba(212,168,67,.4);background:rgba(212,168,67,.08)}
+.lib-songs{display:flex;flex-direction:column;gap:6px;overflow-y:auto;max-height:52vh}
+.lib-song{
+  display:flex;align-items:center;gap:10px;padding:8px 12px;
+  background:var(--bg-soft);border:1px solid var(--line);border-radius:8px;
+}
+.lib-song-name{flex:1;font-size:13px;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lib-add{
+  flex:none;background:transparent;border:1px solid var(--line);border-radius:6px;
+  color:var(--gold);font-size:13px;cursor:pointer;padding:3px 10px;font-family:inherit;
+}
+.lib-add:hover{border-color:var(--gold);background:rgba(212,168,67,.1)}
+
+/* 网易云导入 */
+.import-row{display:flex;gap:10px}
+.import-row .field{flex:1}
+.import-status{font-size:13px;color:var(--text-dim);min-height:18px}
+.import-preview{display:flex;flex-direction:column;gap:10px;min-height:0}
+.import-preview-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.import-name{font-size:14px;font-weight:600;color:var(--gold-soft)}
+.link-btns{margin-left:auto;display:flex;gap:6px}
+.import-list{
+  display:flex;flex-direction:column;gap:4px;overflow-y:auto;max-height:38vh;
+  border:1px solid var(--line);border-radius:8px;padding:8px;
+}
+.import-item{
+  display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:6px;
+  font-size:13px;cursor:pointer;
+}
+.import-item:hover{background:var(--bg-soft)}
+.import-item input{accent-color:var(--gold);flex:none}
+.import-item-name{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
 /* ===== 结束页 ===== */
 .champions{display:flex;flex-direction:column;gap:10px;max-width:560px;margin:0 auto}

@@ -6,6 +6,9 @@ let reconnectTimer = null;
 let pollTimer = null;
 // 多人同时操作时会连着收到多条广播，用这个标记把它们合并到同一帧只渲染一次
 let renderQueued = false;
+// 服务端与本地时钟偏差（广播里带 serverNow，用于倒计时显示）
+let serverOffset = 0;
+let timerTick = null;
 
 function loadIdentity() {
   me.id = localStorage.getItem("sc_id");
@@ -102,13 +105,27 @@ function connect() {
     send({ type: "hello", id: me.id, name: me.name });
   };
   ws.onmessage = (e) => {
+    let m;
     try {
-      const m = JSON.parse(e.data);
-      if (m.type === "state") {
-        state = m.state;
-        scheduleRender();
+      m = JSON.parse(e.data);
+    } catch {
+      return;
+    }
+    if (m.type === "state") {
+      state = m.state;
+      serverOffset = (m.state.serverNow || Date.now()) - Date.now();
+      scheduleRender();
+    } else if (m.type === "error") {
+      toast(m.message || "操作未生效");
+    } else if (m.type === "warning") {
+      // 服务端的软警告（如准备人数不足）：确认后带 force 重发同一动作
+      if (confirm(m.message || "确定继续吗？")) {
+        if (m.action === "start") send({ type: "start", force: true });
       }
-    } catch {}
+    } else if (m.type === "imported") {
+      toast("已导入 " + m.added + " 首" + (m.skipped ? "（跳过重复 " + m.skipped + " 首）" : ""));
+      if (m.added > 0) closeImport();
+    }
   };
   ws.onclose = () => {
     setConn(false);
@@ -149,9 +166,13 @@ function startPoll() {
     try {
       const reg = first ? "&reg=1" : "";
       first = false;
-      const r = await fetch("/state?room=" + encodeURIComponent(room) + reg);
+      // viewer=自己的 id：隐藏模式下轮询回退也能看到自己的选择
+      const r = await fetch(
+        "/state?room=" + encodeURIComponent(room) + reg + "&viewer=" + encodeURIComponent(me.id || "")
+      );
       if (r.ok) {
         state = await r.json();
+        serverOffset = (state.serverNow || Date.now()) - Date.now();
         scheduleRender();
       }
     } catch {}
@@ -159,6 +180,13 @@ function startPoll() {
 }
 
 // ===== 操作 =====
+function isHost() {
+  return !!state.hostId && state.hostId === me.id;
+}
+function myParticipant() {
+  return state.participants.find((p) => p.id === me.id);
+}
+
 function addSong() {
   const titleEl = document.getElementById("songTitle");
   const artistEl = document.getElementById("songArtist");
@@ -171,6 +199,11 @@ function addSong() {
   titleEl.focus();
 }
 
+function addFromLibrary(title, artist) {
+  send({ type: "add_song", title, artist });
+  toast("已添加：" + title);
+}
+
 function removeSong(songId) {
   if (!confirm("从歌单中删除这首歌？")) return;
   send({ type: "remove_song", songId });
@@ -181,10 +214,26 @@ function clearSongs() {
   send({ type: "clear_songs" });
 }
 
+function toggleReady() {
+  send({ type: "ready" });
+}
+
+function setDuration() {
+  send({ type: "set_duration", duration: Number(document.getElementById("durationSel").value) });
+}
+
+function setReveal() {
+  send({ type: "set_reveal", value: document.getElementById("revealSel").value === "1" });
+}
+
+function toggleReveal() {
+  send({ type: "set_reveal", value: !state.revealPicks });
+}
+
 function startGame() {
   if (state.songs.length < 2) return toast("至少添加 2 首歌");
   if (state.songs.length % 2 !== 0) return toast("歌曲数量必须为偶数才能开始");
-  send({ type: "start" });
+  send({ type: "start" }); // 准备不足 2/3 时服务端会回 warning，确认后自动带 force 重发
 }
 
 function choosePair(pairIndex, songId) {
@@ -195,8 +244,165 @@ function nextRound() {
   send({ type: "next_round" });
 }
 
+function forceSettle() {
+  if (!confirm("立即结算？还没追赶完的玩家将按随机评选出最终歌曲。")) return;
+  send({ type: "force_settle" });
+}
+
 function resetGame() {
   send({ type: "reset" });
+}
+
+/* ===== 曲库弹窗 ===== */
+let libArtist = null;
+let libQuery = "";
+
+function openLibrary() {
+  libQuery = "";
+  document.getElementById("libSearch").value = "";
+  const artists = Object.keys(SONG_LIBRARY);
+  libArtist = artists[0] || null;
+  document.getElementById("libraryModal").style.display = "flex";
+  renderLibrary();
+}
+function closeLibrary() {
+  document.getElementById("libraryModal").style.display = "none";
+}
+
+function renderLibrary() {
+  libQuery = document.getElementById("libSearch").value.trim().toLowerCase();
+  const artists = Object.keys(SONG_LIBRARY);
+  const hit = (a) =>
+    !libQuery ||
+    a.toLowerCase().includes(libQuery) ||
+    SONG_LIBRARY[a].some((t) => t.toLowerCase().includes(libQuery));
+  const artistHits = artists.filter(hit);
+
+  // 左侧：歌手列表（有命中歌曲才显示）
+  const artistBox = document.getElementById("libArtists");
+  artistBox.textContent = "";
+  for (const a of artistHits) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "lib-artist" + (a === libArtist ? " active" : "");
+    item.textContent = a;
+    item.onclick = () => {
+      libArtist = a;
+      renderLibrary();
+    };
+    artistBox.appendChild(item);
+  }
+  // 当前选中的歌手没有命中时，切到第一个有命中的歌手
+  if (artistHits.indexOf(libArtist) < 0) libArtist = artistHits[0] || null;
+
+  // 右侧：歌曲列表
+  const songBox = document.getElementById("libSongs");
+  songBox.textContent = "";
+  const songs = SONG_LIBRARY[libArtist] || [];
+  const shown = libQuery ? songs.filter((t) => t.toLowerCase().includes(libQuery)) : songs;
+  if (shown.length === 0) {
+    songBox.appendChild(emptyNode("没有匹配的歌曲"));
+    return;
+  }
+  for (const title of shown) {
+    const row = document.createElement("div");
+    row.className = "lib-song";
+    const nm = document.createElement("span");
+    nm.className = "lib-song-name";
+    nm.textContent = title;
+    const plus = document.createElement("button");
+    plus.type = "button";
+    plus.className = "lib-add";
+    plus.textContent = "＋";
+    plus.title = "加入歌单";
+    plus.onclick = () => addFromLibrary(title, libArtist);
+    row.appendChild(nm);
+    row.appendChild(plus);
+    songBox.appendChild(row);
+  }
+}
+
+/* ===== 网易云导入弹窗 ===== */
+let importData = null; // {name, songs:[{title,artist}]}
+
+function openImport() {
+  document.getElementById("importUrl").value = "";
+  document.getElementById("importStatus").textContent = "";
+  document.getElementById("importPreview").style.display = "none";
+  importData = null;
+  document.getElementById("importModal").style.display = "flex";
+}
+function closeImport() {
+  document.getElementById("importModal").style.display = "none";
+}
+
+async function fetchImport() {
+  const url = document.getElementById("importUrl").value.trim();
+  if (!url) return toast("请先粘贴网易云歌单链接或 ID");
+  const status = document.getElementById("importStatus");
+  const btn = document.getElementById("importFetchBtn");
+  btn.disabled = true;
+  status.textContent = "⏳ 正在抓取歌单…";
+  try {
+    const r = await fetch("/api/netease?url=" + encodeURIComponent(url));
+    const j = await r.json();
+    if (!j.ok) {
+      status.textContent = "❌ " + (j.error || "抓取失败");
+      return;
+    }
+    importData = j;
+    document.getElementById("importName").textContent = "《" + j.name + "》";
+    document.getElementById("importCount").textContent = "共 " + j.count + " 首";
+    renderImportList();
+    document.getElementById("importPreview").style.display = "block";
+    status.textContent = "";
+  } catch (e) {
+    status.textContent = "❌ 网络错误：" + String((e && e.message) || e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderImportList() {
+  const list = document.getElementById("importList");
+  list.textContent = "";
+  if (!importData) return;
+  for (const s of importData.songs) {
+    const row = document.createElement("label");
+    row.className = "import-item";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.className = "import-cb";
+    cb.checked = true;
+    const nm = document.createElement("span");
+    nm.className = "import-item-name";
+    nm.textContent = s.title;
+    const ar = document.createElement("span");
+    ar.className = "muted";
+    ar.textContent = s.artist || "";
+    row.appendChild(cb);
+    row.appendChild(nm);
+    row.appendChild(ar);
+    list.appendChild(row);
+  }
+}
+
+function importSelectAll(on) {
+  document.getElementById("importList").querySelectorAll(".import-cb").forEach((cb) => (cb.checked = on));
+}
+
+function confirmImport() {
+  if (!importData) return;
+  const boxes = document.getElementById("importList").querySelectorAll(".import-cb");
+  const picked = [];
+  importData.songs.forEach((s, i) => {
+    if (boxes[i] && boxes[i].checked) picked.push(s);
+  });
+  if (picked.length === 0) return toast("还没有选中任何歌曲");
+  // 服务端单条消息上限 100 首，分批发送（WebSocket 保序，依次处理）
+  for (let i = 0; i < picked.length; i += 100) {
+    send({ type: "import_songs", songs: picked.slice(i, i + 100) });
+  }
 }
 
 // ===== 渲染 =====
@@ -230,6 +436,15 @@ function renderInner() {
     showPhase("phase-" + phase);
     curPhase = phase;
   }
+  // 房主标识 / 管理员通知
+  document.getElementById("hostBadge").style.display = isHost() ? "" : "none";
+  const noticeBar = document.getElementById("noticeBar");
+  if (state.notice) {
+    noticeBar.textContent = "📢 " + state.notice;
+    noticeBar.style.display = "";
+  } else {
+    noticeBar.style.display = "none";
+  }
   if (phase === "collecting") {
     renderCollecting();
   } else if (phase === "playing") {
@@ -237,6 +452,7 @@ function renderInner() {
   } else if (phase === "finished") {
     renderFinished();
   }
+  updateTimerLabel();
 }
 
 const songMap = {};
@@ -301,6 +517,13 @@ function setOn(el, on, cls) {
   else el.classList.remove(cls);
 }
 
+function badge(text, cls) {
+  const b = document.createElement("span");
+  b.className = "badge " + cls;
+  b.textContent = text;
+  return b;
+}
+
 /* ---------------- 收集阶段 ---------------- */
 function buildSongRow(s) {
   const row = document.createElement("div");
@@ -340,8 +563,11 @@ function buildPersonRow(p) {
   dot.className = "dot";
   const nm = document.createElement("span");
   nm.className = "person-name";
+  const badges = document.createElement("span");
+  badges.className = "badges";
   c.appendChild(dot);
   c.appendChild(nm);
+  c.appendChild(badges);
   return c;
 }
 
@@ -350,11 +576,16 @@ function updatePersonRow(c, p) {
   const dot = c.children[0];
   setOn(dot, !!p.online, "online");
   c.children[1].textContent = p.name + (p.id === me.id ? "（你）" : "");
+  const badges = c.children[2];
+  badges.textContent = "";
+  if (p.id === state.hostId) badges.appendChild(badge("房主", "badge-host"));
+  if (p.ready) badges.appendChild(badge("已准备", "badge-ready"));
 }
 
 function renderCollecting() {
   refreshMaps();
-  const mine = state.participants.find((p) => p.id === me.id);
+  const mine = myParticipant();
+  const ready = !!(mine && mine.ready);
 
   // 歌单
   const pl = document.getElementById("playlist");
@@ -363,29 +594,45 @@ function renderCollecting() {
   } else {
     syncList(pl, state.songs, (s) => s.id, buildSongRow, updateSongRow);
   }
-
   document.getElementById("songCount").textContent = "共 " + state.songs.length + " 首";
 
-  // 开始按钮
-  const even = state.songs.length >= 2 && state.songs.length % 2 === 0;
+  // 准备后锁定添加
+  document.getElementById("songTitle").disabled = ready;
+  document.getElementById("songArtist").disabled = ready;
+  document.getElementById("libBtn").style.display = ready ? "none" : "";
+  document.getElementById("importBtn").style.display = ready ? "none" : "";
+  document.getElementById("readyLockHint").style.display = ready ? "" : "none";
+
+  // 开始区：房主设置 + 开始按钮；其他人看到准备按钮
+  const host = isHost();
+  document.getElementById("hostSettings").style.display = host ? "" : "none";
+  document.getElementById("startBtn").style.display = host ? "" : "none";
+  document.getElementById("readyBtn").style.display = host ? "none" : "";
+  document.getElementById("readyBtn").textContent = ready ? "取消准备" : "✓ 我准备好了";
+  document.getElementById("durationSel").value = String(state.roundDuration);
+  document.getElementById("revealSel").value = state.revealPicks ? "1" : "0";
+
+  const inGame = state.participants.filter((p) => p.inGame);
   const startBtn = document.getElementById("startBtn");
   const hint = document.getElementById("startHint");
-  if (state.songs.length < 2) {
+  const even = state.songs.length >= 2 && state.songs.length % 2 === 0;
+  const readyText = "已准备 " + (state.readyCount || 0) + " / " + inGame.length + " 人（房主计入）";
+  if (!even) {
     startBtn.disabled = true;
     startBtn.textContent = "开始淘汰赛";
-    hint.textContent = "至少添加 2 首歌后开始";
-  } else if (!even) {
-    startBtn.disabled = true;
-    startBtn.textContent = "开始淘汰赛";
-    hint.textContent = "歌曲数量需为偶数（当前 " + state.songs.length + " 首），再加/删一首即可";
+    hint.textContent =
+      state.songs.length < 2
+        ? "至少添加 2 首歌后开始"
+        : "歌曲数量需为偶数（当前 " + state.songs.length + " 首），再加/删一首即可";
   } else {
     startBtn.disabled = false;
     startBtn.textContent = "开始淘汰赛（" + state.songs.length + " 首）";
-    hint.textContent = "全员准备就绪后点击，开始逐轮二选一";
+    hint.textContent = host
+      ? readyText + " · 不足 2/3 时会警告，可强制开始"
+      : "等待房主开始 · " + readyText;
   }
 
   // 参赛者
-  const inGame = state.participants.filter((p) => p.inGame);
   document.getElementById("inGameCount").textContent = "· " + inGame.length + " 人";
   const people = document.getElementById("people");
   if (inGame.length === 0) {
@@ -460,8 +707,11 @@ function buildBoardPerson(p) {
   dot.className = "dot";
   const nm = document.createElement("span");
   nm.className = "person-name";
+  const rt = document.createElement("span");
+  rt.className = "round-tag";
   head.appendChild(dot);
   head.appendChild(nm);
+  head.appendChild(rt);
   const picks = document.createElement("div");
   picks.className = "person-picks";
   card.appendChild(head);
@@ -475,10 +725,26 @@ function updateBoardPerson(card, p) {
   const picks = card.children[1];
   setOn(head.children[0], !!p.online, "online");
   head.children[1].textContent = p.name + (p.id === me.id ? "（你）" : "");
+  // 落后于共享轮的玩家：标注正在追赶第几轮
+  const rt = head.children[2];
+  if (p.behind) {
+    rt.textContent = "追赶第 " + (p.playerRound + 1) + " 轮";
+    rt.style.display = "";
+  } else {
+    rt.textContent = "";
+    rt.style.display = "none";
+  }
 
   if (!p.inGame) {
     clearBox(picks, null);
     picks.appendChild(pickEmpty("旁观者"));
+  } else if (p.champion != null) {
+    // 已角逐出最终歌曲：永远公开
+    clearBox(picks, null);
+    const chip = document.createElement("span");
+    chip.className = "pick-chip champ-chip";
+    chip.textContent = "🏆 " + songTitle(p.champion);
+    picks.appendChild(chip);
   } else if (!p.pairs || p.pairs.length === 0) {
     clearBox(picks, null);
     picks.appendChild(pickEmpty("等待开始"));
@@ -509,6 +775,9 @@ function updatePickChip(chip, pr) {
   if (pr.b === null) {
     chip.className = "pick-chip bye-chip";
     chip.textContent = "轮空：" + songTitle(pr.a);
+  } else if (pr.hidden) {
+    chip.className = "pick-chip hidden-chip";
+    chip.textContent = "（已隐藏）";
   } else {
     const chosen = pr.pick;
     chip.className = "pick-chip" + (chosen ? " chosen" : "");
@@ -518,29 +787,72 @@ function updatePickChip(chip, pr) {
 
 function renderPlaying() {
   refreshMaps();
-  const mine = state.participants.find((p) => p.id === me.id);
+  const mine = myParticipant();
+  const host = isHost();
+  const waiting = state.currentRound >= state.totalRounds; // 同步玩家已角逐完，等待追赶
 
-  document.getElementById("roundNo").textContent = (state.currentRound + 1);
+  document.getElementById("roundNo").textContent = waiting
+    ? state.totalRounds
+    : state.currentRound + 1;
   document.getElementById("roundTotal").textContent = state.totalRounds;
 
   // 本轮进度
-  const inGame = state.participants.filter((p) => p.inGame && p.pairs);
-  const done = inGame.filter(participantDone).length;
+  const onlineInGame = state.participants.filter((p) => p.inGame && p.online);
+  const done = onlineInGame.filter(participantDone).length;
   const statusEl = document.getElementById("roundStatus");
-  if (state.roundComplete) {
-    statusEl.textContent = "本轮已全部选择 ✓ 可进入下一轮";
+  if (waiting) {
+    statusEl.textContent =
+      "已角逐出结果，等待 " + (state.pendingCount || 0) + " 人追赶";
+    statusEl.className = "round-status done";
+  } else if (state.roundComplete) {
+    statusEl.textContent = host ? "本轮已全部选择 ✓ 可进入下一轮" : "本轮已全部选择 ✓ 等待房主进入下一轮";
     statusEl.className = "round-status done";
   } else {
-    statusEl.textContent = "等待选择中… " + done + " / " + inGame.length + " 人已完成";
+    statusEl.textContent = "等待选择中… " + done + " / " + onlineInGame.length + " 人已完成";
     statusEl.className = "round-status";
+  }
+
+  // 房主控件：公开/隐藏切换、下一轮
+  const revealBtn = document.getElementById("revealBtn");
+  revealBtn.style.display = host ? "" : "none";
+  revealBtn.textContent = state.revealPicks ? "👁 每轮选择：公开" : "👁 每轮选择：隐藏";
+  const nextBtn = document.getElementById("nextBtn");
+  nextBtn.style.display = host ? "" : "none";
+  nextBtn.disabled = !state.roundComplete || waiting;
+  nextBtn.textContent = waiting ? "已到末轮" : "下一轮";
+  document.getElementById("revealTag").textContent = state.revealPicks ? "" : "（本局选择隐藏中）";
+
+  // 我在追赶旧轮次的提示
+  const behindNotice = document.getElementById("behindNotice");
+  if (mine && mine.behind) {
+    behindNotice.textContent =
+      "你落后了 " + (state.currentRound - mine.playerRound) + " 轮，正在追赶：依次完成选择即可连续跟上，不受本轮限时影响";
+    behindNotice.style.display = "";
+  } else {
+    behindNotice.style.display = "none";
+  }
+  const eventNotice = document.getElementById("eventNotice");
+  if (state.lastEvent) {
+    eventNotice.textContent = "⏳ " + state.lastEvent;
+    eventNotice.style.display = "";
+  } else {
+    eventNotice.style.display = "none";
   }
 
   // 我的对阵
   const myPairs = document.getElementById("myPairs");
+  document.getElementById("myPairsHint").textContent =
+    mine && mine.behind ? "追赶第 " + (mine.playerRound + 1) + " 轮 · 点击二选一" : "点击二选一";
   if (!mine) {
     clearBox(myPairs, "正在同步你的身份…");
   } else if (!mine.inGame) {
     clearBox(myPairs, "你在本局是旁观者，可看大家的选择（下一局自动参赛）");
+  } else if (mine.champion != null) {
+    clearBox(myPairs, null);
+    const c = document.createElement("div");
+    c.className = "empty champ-line";
+    c.textContent = "🏆 你的最终歌曲：" + songTitle(mine.champion);
+    myPairs.appendChild(c);
   } else if (!mine.pairs || mine.pairs.length === 0) {
     clearBox(myPairs, "等待本局开始…");
   } else {
@@ -556,8 +868,26 @@ function renderPlaying() {
     syncList(board, others, (p) => p.id, buildBoardPerson, updateBoardPerson);
   }
 
-  // 下一轮按钮
-  document.getElementById("nextBtn").disabled = !state.roundComplete;
+  // 等待追赶区：展示已定冠军 + 房主强制结算
+  const waitingBar = document.getElementById("waitingBar");
+  const playGrid = document.getElementById("playGrid");
+  if (waiting) {
+    playGrid.style.display = "none";
+    waitingBar.style.display = "";
+    const doneList = state.participants.filter((p) => p.inGame && p.champion != null);
+    const doneChamps = document.getElementById("doneChamps");
+    if (doneList.length === 0) {
+      clearBox(doneChamps, "—");
+    } else {
+      syncList(doneChamps, doneList, (p) => p.id, buildChampion, updateChampion);
+    }
+    document.getElementById("settleBtn").style.display = host ? "" : "none";
+  } else {
+    playGrid.style.display = "";
+    waitingBar.style.display = "none";
+  }
+
+  updateTimerLabel();
 }
 
 /* ---------------- 结束阶段 ---------------- */
@@ -592,6 +922,30 @@ function renderFinished() {
     return;
   }
   syncList(ch, inGame, (p) => p.id, buildChampion, updateChampion);
+  document.getElementById("resetBtn").style.display = isHost() ? "" : "none";
+  document.getElementById("resetHint").style.display = isHost() ? "none" : "";
+}
+
+/* ---------------- 单轮倒计时 ---------------- */
+function updateTimerLabel() {
+  const el = document.getElementById("roundTimer");
+  if (!el) return;
+  if (state.phase !== "playing" || !state.roundEndsAt) {
+    el.textContent = "";
+    el.className = "round-timer";
+    return;
+  }
+  const remain = state.roundEndsAt - (Date.now() + serverOffset);
+  if (remain <= 0) {
+    el.textContent = "⏱ 00:00";
+    el.className = "round-timer urgent";
+    return;
+  }
+  const s = Math.ceil(remain / 1000);
+  const mm = String(Math.floor(s / 60)).padStart(2, "0");
+  const ss = String(s % 60).padStart(2, "0");
+  el.textContent = "⏱ " + mm + ":" + ss;
+  el.className = "round-timer" + (s <= 10 ? " urgent" : "");
 }
 
 // ===== 回车快捷 =====
@@ -599,6 +953,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Enter") return;
   const a = document.activeElement;
   if (a === document.getElementById("songArtist")) addSong();
+  else if (a === document.getElementById("importUrl")) fetchImport();
   else if (a === document.getElementById("roomInput")) joinRoom();
   else if (a === document.getElementById("nameInput")) joinRoom();
 });
@@ -609,5 +964,7 @@ loadIdentity();
   const room = getRoom();
   if (room) document.getElementById("roomInput").value = room;
   if (me.name) document.getElementById("nameInput").value = me.name;
+  clearInterval(timerTick);
+  timerTick = setInterval(updateTimerLabel, 500);
   if (room && me.name) joinRoom();
 })();

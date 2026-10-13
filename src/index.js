@@ -1,6 +1,7 @@
 // Worker 入口：
 //  - /ws?room=XXX        -> 升级为 WebSocket，交给对应房间的 Durable Object（并登记房间索引）
 //  - /state?room=XXX      -> 返回房间当前状态（轮询回退 / 初始加载；?reg=1 时登记房间索引）
+//  - /api/netease?url=... -> 抓取网易云歌单的歌曲名与歌手（服务端代抓，前端无跨域问题）
 //  - /admin               -> 管理员后台页面（静态资源 admin.html）
 //  - /admin/api/ping      -> 后台自检（需 ADMIN_TOKEN）
 //  - /admin/api/rooms     -> 列出所有房间（需 ADMIN_TOKEN）
@@ -86,6 +87,94 @@ function adminAuthorized(request, env) {
   return false;
 }
 
+/* ===== 网易云歌单导入 =====
+ * 只抓取「歌曲名 + 歌手名」：公开歌单无需登录即可读取，
+ * 服务端代抓也省掉前端跨域问题。支持各种形式的分享链接或纯数字 ID。
+ */
+const NE_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const NE_HEADERS = { "user-agent": NE_UA, referer: "https://music.163.com/" };
+const NE_MAX_SONGS = 300; // 单次导入上限，够淘汰赛用了
+
+// 从分享链接里解析歌单 ID：
+//   https://music.163.com/playlist?id=123 / https://music.163.com/playlist/123/?userid=45
+//   https://y.music.163.com/m/playlist?id=123 / https://music.163.com/#/playlist?id=123
+function parsePlaylistId(input) {
+  const s = String(input || "").trim();
+  if (!s) return null;
+  if (/^\d{3,12}$/.test(s)) return s; // 纯 ID
+  let m = s.match(/[?&]id=(\d{3,12})/);
+  if (m) return m[1];
+  m = s.match(/playlist\/(\d{3,12})/);
+  if (m) return m[1];
+  m = s.match(/(?:^|\/)(\d{3,12})(?:[/?#]|$)/);
+  if (m) return m[1];
+  return null;
+}
+
+function trackToSong(t) {
+  const title = String((t && t.name) || "").trim();
+  if (!title) return null;
+  const artists = (t.artists || t.ar || []).map((a) => a && a.name).filter(Boolean);
+  return { title: title.slice(0, 80), artist: artists.join(" / ").slice(0, 80) };
+}
+
+async function fetchNeteasePlaylist(input) {
+  const id = parsePlaylistId(input);
+  if (!id) return { ok: false, error: "无法识别歌单链接：请粘贴网易云歌单分享链接或纯数字 ID" };
+
+  let detail = null;
+  try {
+    const res = await fetch("https://music.163.com/api/playlist/detail?id=" + id, {
+      headers: NE_HEADERS,
+    });
+    detail = await res.json();
+  } catch (e) {
+    return { ok: false, error: "抓取失败：" + String((e && e.message) || e) };
+  }
+
+  const result = (detail && detail.result) || null;
+  const tracks = (result && result.tracks) || [];
+  const trackIds = (result && result.trackIds) || [];
+  if (!result || (tracks.length === 0 && trackIds.length === 0)) {
+    return { ok: false, error: "歌单不存在、未公开或链接已失效" };
+  }
+
+  let songs = tracks.map(trackToSong).filter(Boolean);
+  // 大歌单的 tracks 可能被截断：按 trackIds 分批补全（每批 50 首）
+  const have = new Set(tracks.map((t) => t.id));
+  const missing = trackIds.map((x) => x.id).filter((x) => !have.has(x));
+  const budget = NE_MAX_SONGS - songs.length;
+  for (let i = 0; i < missing.length && i < budget; i += 50) {
+    const chunk = missing.slice(i, i + 50);
+    try {
+      const c = encodeURIComponent(JSON.stringify(chunk.map((x) => ({ id: x }))));
+      const res = await fetch("https://music.163.com/api/v3/song/detail?c=" + c, {
+        headers: NE_HEADERS,
+      });
+      const j = await res.json();
+      for (const t of j.songs || []) {
+        const song = trackToSong(t);
+        if (song) songs.push(song);
+      }
+    } catch {
+      break; // 补全失败就用已抓到的部分
+    }
+  }
+
+  // 去重 + 截断到上限
+  const seen = new Set();
+  const out = [];
+  for (const s of songs) {
+    const key = (s.title + "|" + s.artist).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
+    if (out.length >= NE_MAX_SONGS) break;
+  }
+  return { ok: true, id, name: String(result.name || "歌单 " + id).slice(0, 60), count: out.length, songs: out };
+}
+
 async function handle(request, env, ctx) {
   const url = new URL(request.url);
   const p = url.pathname;
@@ -105,6 +194,12 @@ async function handle(request, env, ctx) {
       else await task;
     }
     return stubFor(env, room).fetch(request);
+  }
+
+  // —— 网易云歌单导入（无需登录，只取歌曲名与歌手）——
+  if (p === "/api/netease") {
+    if (request.method !== "GET") return json({ error: "Method Not Allowed" }, 405);
+    return json(await fetchNeteasePlaylist(url.searchParams.get("url") || ""));
   }
 
   // —— 管理员后台页面（外壳无需鉴权，数据接口才鉴权）——

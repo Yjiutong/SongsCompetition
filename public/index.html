@@ -24,7 +24,7 @@
       <input id="nameInput" class="field" type="text" placeholder="例如 小明" maxlength="24" autocomplete="off">
 
       <button id="joinBtn" class="btn btn-primary btn-block" onclick="joinRoom()">进入房间</button>
-      <p class="hint">同一房间号的人进入同一房间；把房间号或链接发给朋友即可一起玩。</p>
+      <p class="hint">同一房间号的人进入同一房间；把房间号或链接发给朋友即可一起玩。<br>第一个进入房间的人是房主，由房主确认开始。</p>
     </div>
   </div>
 </div>
@@ -38,12 +38,15 @@
         <div class="room-id" id="roomId">—</div>
       </div>
       <div class="head-actions">
+        <span id="hostBadge" class="host-badge" style="display:none">👑 房主</span>
         <span id="connStatus" class="conn conn-off">连接中…</span>
         <button class="btn btn-ghost btn-sm" onclick="copyLink()">复制邀请链接</button>
         <button class="btn btn-ghost btn-sm" onclick="clearCache()">清除缓存</button>
         <button class="btn btn-ghost btn-sm" onclick="leaveRoom()">离开</button>
       </div>
     </header>
+
+    <div id="noticeBar" class="notice-bar" style="display:none"></div>
 
     <!-- ===== 收集阶段 ===== -->
     <section id="phase-collecting" class="phase">
@@ -55,9 +58,14 @@
           <button class="btn btn-primary" onclick="addSong()">添加</button>
         </div>
         <div class="add-tools">
-          <button class="btn btn-ghost btn-sm" onclick="clearSongs()">清空歌单</button>
+          <div class="tool-btns">
+            <button id="libBtn" class="btn btn-ghost btn-sm" onclick="openLibrary()">📚 曲库选歌</button>
+            <button id="importBtn" class="btn btn-ghost btn-sm" onclick="openImport()">☁️ 导入网易云歌单</button>
+            <button id="clearBtn" class="btn btn-ghost btn-sm" onclick="clearSongs()">清空歌单</button>
+          </div>
           <span class="muted" id="songCount">共 0 首</span>
         </div>
+        <p id="readyLockHint" class="hint" style="display:none">你已准备 ✓ 取消准备后才能添加歌曲</p>
       </section>
 
       <div class="grid">
@@ -67,7 +75,25 @@
             <div class="empty">还没有歌曲，在上面添加第一首吧 ♪</div>
           </div>
           <div class="start-bar">
+            <div id="hostSettings" class="host-settings" style="display:none">
+              <label class="setting">单轮时长
+                <select id="durationSel" onchange="setDuration()">
+                  <option value="30000">30 秒</option>
+                  <option value="60000">60 秒</option>
+                  <option value="90000">90 秒</option>
+                  <option value="120000">2 分钟</option>
+                  <option value="0">不限时</option>
+                </select>
+              </label>
+              <label class="setting">每轮选择
+                <select id="revealSel" onchange="setReveal()">
+                  <option value="1">实时公开</option>
+                  <option value="0">隐藏（结束才公开）</option>
+                </select>
+              </label>
+            </div>
             <button id="startBtn" class="btn btn-primary btn-block" onclick="startGame()">开始淘汰赛</button>
+            <button id="readyBtn" class="btn btn-ghost btn-block" onclick="toggleReady()" style="display:none">✓ 我准备好了</button>
             <p id="startHint" class="hint center"></p>
           </div>
         </section>
@@ -86,26 +112,37 @@
       <div class="round-bar">
         <div class="round-no">第 <span id="roundNo">1</span> / <span id="roundTotal">?</span> 轮</div>
         <div class="round-status" id="roundStatus"></div>
+        <div class="round-tools">
+          <span id="roundTimer" class="round-timer"></span>
+          <button id="revealBtn" class="btn btn-ghost btn-sm" onclick="toggleReveal()" style="display:none"></button>
+          <button id="nextBtn" class="btn btn-primary btn-sm" onclick="nextRound()" style="display:none">下一轮</button>
+        </div>
       </div>
+      <p id="behindNotice" class="behind-notice" style="display:none"></p>
+      <p id="eventNotice" class="event-notice" style="display:none"></p>
 
-      <div class="grid">
+      <div id="playGrid" class="grid">
         <section class="panel">
-          <h2 class="panel-title">你的对阵 <span class="muted">点击二选一</span></h2>
+          <h2 class="panel-title">你的对阵 <span class="muted" id="myPairsHint">点击二选一</span></h2>
           <div id="myPairs" class="pairs">
             <div class="empty">等待本局开始…</div>
           </div>
         </section>
 
         <section class="panel">
-          <h2 class="panel-title">本轮所有人的选择</h2>
+          <h2 class="panel-title">本轮所有人的选择 <span class="muted" id="revealTag"></span></h2>
           <div id="board" class="board">
             <div class="empty">等待大家选择…</div>
           </div>
         </section>
       </div>
 
-      <div class="actions center">
-        <button id="nextBtn" class="btn btn-primary btn-lg" onclick="nextRound()">下一轮</button>
+      <div id="waitingBar" class="waiting-bar" style="display:none">
+        <h2 class="panel-title big">🎉 已角逐出最终歌曲，等待落下的玩家追赶</h2>
+        <div id="doneChamps" class="champions"></div>
+        <div class="actions center">
+          <button id="settleBtn" class="btn btn-ghost btn-lg" onclick="forceSettle()" style="display:none">立即结算（未追赶完的随机评选）</button>
+        </div>
       </div>
     </section>
 
@@ -116,15 +153,61 @@
         <div class="empty">—</div>
       </div>
       <div class="actions center">
-        <button class="btn btn-ghost btn-lg" onclick="resetGame()">再来一局（保留歌单）</button>
+        <button id="resetBtn" class="btn btn-ghost btn-lg" onclick="resetGame()">再来一局（保留歌单）</button>
+        <p id="resetHint" class="hint center" style="display:none">等待房主开始下一局</p>
       </div>
     </section>
+  </div>
+</div>
+
+<!-- ===== 曲库弹窗 ===== -->
+<div id="libraryModal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeLibrary()">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>📚 预制曲库</h3>
+      <button class="modal-close" onclick="closeLibrary()">×</button>
+    </div>
+    <input id="libSearch" class="field" type="text" placeholder="搜索歌名或歌手…" oninput="renderLibrary()">
+    <div class="lib-body">
+      <div id="libArtists" class="lib-artists"></div>
+      <div id="libSongs" class="lib-songs"></div>
+    </div>
+    <p class="hint">点击歌曲右侧的 ＋ 直接加入共享歌单</p>
+  </div>
+</div>
+
+<!-- ===== 网易云导入弹窗 ===== -->
+<div id="importModal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeImport()">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>☁️ 导入网易云歌单</h3>
+      <button class="modal-close" onclick="closeImport()">×</button>
+    </div>
+    <div class="import-row">
+      <input id="importUrl" class="field" type="text" placeholder="粘贴歌单分享链接或 ID" autocomplete="off">
+      <button id="importFetchBtn" class="btn btn-primary" onclick="fetchImport()">获取歌曲</button>
+    </div>
+    <p class="hint">只读取歌曲名与歌手名；公开歌单无需登录网易云。</p>
+    <div id="importStatus" class="import-status"></div>
+    <div id="importPreview" class="import-preview" style="display:none">
+      <div class="import-preview-head">
+        <span id="importName" class="import-name"></span>
+        <span class="muted" id="importCount"></span>
+        <span class="link-btns">
+          <button class="btn btn-ghost btn-sm" onclick="importSelectAll(true)">全选</button>
+          <button class="btn btn-ghost btn-sm" onclick="importSelectAll(false)">全不选</button>
+        </span>
+      </div>
+      <div id="importList" class="import-list"></div>
+      <button class="btn btn-primary btn-block" onclick="confirmImport()">添加所选歌曲</button>
+    </div>
   </div>
 </div>
 
 <!-- 轻提示 -->
 <div id="toast" class="toast"></div>
 
+<script src="./library.js"></script>
 <script src="./app.js"></script>
 </body>
 </html>

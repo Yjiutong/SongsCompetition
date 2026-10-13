@@ -1,8 +1,11 @@
 // Room Durable Object —— 每个房间一个实例，负责：
-//  1) 收集阶段：所有人共同往歌单里加歌
-//  2) 淘汰赛阶段：点击「开始」(需偶数首) 后，每轮「二选一」逐轮筛除，
-//     直到每个人只剩一首歌即结束；每轮实时向所有人公布各自的选择
-//  3) 通过 Hibernatable WebSocket 向房间内所有人实时广播最新状态
+//  1) 收集阶段：所有人共同往歌单里加歌；非房主可「准备」（准备后不能加歌）；
+//     房主确认开始（准备人数不足 2/3 会警告，房主可强制开始），歌曲需为偶数
+//  2) 淘汰赛阶段：开始后每轮「二选一」逐轮筛除，直到每个人只剩一首歌：
+//     - 单轮限时：超时未选的对阵随机晋级并自动进入下一轮；在线玩家全部选完即提前结束本轮
+//     - 离线玩家不阻塞轮次；回归后可连续选择，逐轮追赶进度
+//     - 每轮选择可设为公开/隐藏（房主随时切换），最终角逐出的歌曲永远公开
+//  3) 通过 Hibernatable WebSocket 实时广播；Alarm 同时驱动「轮次截止」与「空闲清理」
 
 // 内部接口用的 JSON 响应 / 请求体解析（供 Worker 调用 DO 的内部接口使用）
 function jsonRes(data) {
@@ -18,6 +21,9 @@ async function bodyJson(request) {
   }
 }
 
+// 单轮限时的可选值（毫秒）；0 = 不限时
+const ROUND_DURATIONS = [30000, 60000, 90000, 120000, 0];
+
 export class Room {
   constructor(state, env) {
     this.state = state;
@@ -31,11 +37,18 @@ export class Room {
       s = {
         songs: [], // [{id,title,artist,addedBy}]
         phase: "collecting", // collecting | playing | finished
-        currentRound: 0,
-        totalRounds: 0,
-        roundComplete: false,
+        currentRound: 0, // 共享轮次索引（0 起）
+        totalRounds: 0, // 从初始歌曲数推算的总轮数
+        roundComplete: false, // 所有在线参赛者已完成当前共享轮
+        roundDuration: 60000, // 单轮限时（毫秒），0 = 不限时
+        roundEndsAt: null, // 当前轮截止时间戳（毫秒）
+        revealPicks: true, // 每轮选择是否对其他人公开
+        hostId: null, // 房主 = 第一个进入房间的人
+        joinSeq: 0, // 加入顺序计数器（用于房主移交时取最早加入者）
+        notice: null, // 管理员广播的通知
+        lastEvent: null, // 最近一次系统事件（超时/结算/房主移交等）
         emptySince: null, // 最后一位在线者离开的时间戳；用于空闲清理
-        participants: {}, // id -> {id,name,online,inGame,survivors,picks,champion}
+        participants: {}, // id -> {id,name,online,inGame,ready,joinedAt,progress,survivors,picks,champion}
       };
       await this.state.storage.put("state", s);
     }
@@ -48,15 +61,30 @@ export class Room {
   anyOnline(s) {
     return Object.values(s.participants).some((p) => p && p.online);
   }
-  cancelEviction() {
-    try { this.state.storage.deleteAlarm(); } catch {}
-  }
-  scheduleEviction(s) {
-    const fireAt = (s.emptySince ?? Date.now()) + this.EVICT_AFTER_MS;
-    try { this.state.storage.setAlarm(fireAt); } catch {}
+
+  // Alarm 只有一个槽位，轮次截止与空闲清理共用：取更近的时间点排期
+  scheduleAlarm(s) {
+    const now = Date.now();
+    let at = null;
+    if (s.emptySince != null) at = (s.emptySince ?? now) + this.EVICT_AFTER_MS;
+    if (
+      s.phase === "playing" &&
+      s.roundDuration > 0 &&
+      s.roundEndsAt &&
+      !s.roundComplete &&
+      s.currentRound < s.totalRounds
+    ) {
+      if (at == null || s.roundEndsAt < at) at = s.roundEndsAt;
+    }
+    try {
+      if (at != null) this.state.storage.setAlarm(at);
+      else this.state.storage.deleteAlarm();
+    } catch {}
   }
 
-  // 根据某参与者的幸存歌曲列表，算出本轮的所有「二选一」对阵
+  // 根据某参与者的幸存歌曲列表，算出本轮的所有「二选一」对阵。
+  // 纯函数（无随机）：同样的幸存列表永远得到同样的对阵，
+  // 因此离线玩家回归后可以按历史选择逐轮重放、追赶进度。
   // 歌曲数为奇数时，最后一个视为「轮空」(b = null) 自动晋级
   computePairs(survivors) {
     const pairs = [];
@@ -78,39 +106,186 @@ export class Room {
     return r;
   }
 
-  // 判断某个参与者是否已经完成了本轮所有「非轮空」对阵的选择
-  hasPickedAll(s, p) {
-    const pairs = this.computePairs(p.survivors);
-    return pairs.every((pr, idx) => pr.b === null || p.picks[idx] != null);
+  // 某位玩家当前轮（= 其个人进度 progress 对应的那一轮）的对阵
+  pairsOf(p) {
+    return this.computePairs(p.survivors);
   }
 
-  // 对外公开的状态（参与者脱敏为数组，并附上本轮对阵）
-  publicView(s) {
-    const inGame = Object.values(s.participants).filter((p) => p.inGame);
-    const participants = Object.values(s.participants).map((p) => {
-      const base = { id: p.id, name: p.name, online: p.online, inGame: p.inGame };
-      if (s.phase === "playing" && p.inGame) {
-        const pairs = this.computePairs(p.survivors).map((pr, idx) => ({
-          a: pr.a,
-          b: pr.b,
-          pick: p.picks[idx] != null ? p.picks[idx] : null,
-        }));
-        base.pairs = pairs;
-        base.survivorCount = (p.survivors || []).length;
+  // 该玩家是否已完成当前轮的所有「非轮空」对阵的选择
+  roundDoneFor(p) {
+    return this.pairsOf(p).every((pr, i) => pr.b === null || p.picks[i] != null);
+  }
+
+  // 把当前轮的选择结算成新的幸存列表（未选的兜底取 a，正常流程不会触发）
+  settleRound(p) {
+    const next = [];
+    this.pairsOf(p).forEach((pr, i) => {
+      if (pr.b === null) next.push(pr.a); // 轮空自动晋级
+      else next.push(p.picks[i] != null ? p.picks[i] : pr.a);
+    });
+    p.survivors = next;
+    p.picks = [];
+  }
+
+  // 玩家完成当前轮：结算并推进其个人进度
+  advancePlayer(p) {
+    this.settleRound(p);
+    p.progress += 1;
+  }
+
+  // 随机补齐某玩家当前轮未选的对阵（超时 / 强制结算用）
+  autoFillRound(p) {
+    let filled = false;
+    this.pairsOf(p).forEach((pr, i) => {
+      if (pr.b !== null && p.picks[i] == null) {
+        p.picks[i] = Math.random() < 0.5 ? pr.a : pr.b;
+        filled = true;
       }
-      if (s.phase === "finished" && p.inGame) {
-        base.champion = p.champion || null;
+    });
+    return filled;
+  }
+
+  // 从当前轮开始一路随机打到结束（房主强制结算用）
+  autoFinishPlayer(s, p) {
+    while (p.progress < s.totalRounds) {
+      this.autoFillRound(p);
+      this.advancePlayer(p);
+    }
+    p.champion = p.survivors[0] || null;
+  }
+
+  // 重新计算共享轮完成状态：落后追赶者选完立即推进，并判断是否全员角逐结束。
+  // 返回是否有状态变化（供调用方决定是否落盘广播）。
+  // 语义：同步玩家（progress === currentRound）选完后原地等待，由房主点击下一轮
+  //       或超时统一结算推进——保证「本轮所有人的选择」始终是同一轮的数据。
+  refreshRoundState(s) {
+    if (s.phase !== "playing") return false;
+    let changed = false;
+    const active = Object.values(s.participants).filter((p) => p.inGame);
+    // 落后追赶者：选完当前轮立即结算推进（可连续选择逐轮追上）
+    for (const p of active) {
+      if (p.progress < s.currentRound && this.roundDoneFor(p)) {
+        this.advancePlayer(p);
+        changed = true;
+      }
+    }
+    // 共享轮完成：只看「正处于当前轮」的在线玩家；落后追赶者与离线玩家都不阻塞
+    const onRound = active.filter((p) => p.online && p.progress >= s.currentRound);
+    const rc = onRound.length > 0 && onRound.every((p) => this.roundDoneFor(p));
+    if (rc !== s.roundComplete) {
+      s.roundComplete = rc;
+      changed = true;
+    }
+    if (s.roundComplete) s.roundEndsAt = null; // 本轮已无需计时
+    if (active.length > 0 && active.every((p) => p.progress >= s.totalRounds)) {
+      this.finishGame(s);
+      changed = true;
+    }
+    return changed;
+  }
+
+  finishGame(s) {
+    s.phase = "finished";
+    s.roundEndsAt = null;
+    for (const p of Object.values(s.participants)) {
+      if (p.inGame && p.champion == null) p.champion = p.survivors[0] || null;
+    }
+  }
+
+  // 房主确认后进入下一轮：结算已完成上一轮的玩家（幸存列表推进到新轮次）
+  advanceRound(s) {
+    const prev = s.currentRound;
+    s.currentRound = prev + 1;
+    s.roundComplete = false;
+    for (const p of Object.values(s.participants)) {
+      // 已完成上一轮的同步玩家在此结算；没选完的（离线/超时未补）落后，后续追赶
+      if (p.inGame && p.progress === prev && this.roundDoneFor(p)) {
+        this.advancePlayer(p);
+      }
+    }
+    if (s.currentRound >= s.totalRounds) {
+      // 同步玩家已全部角逐完：等待落后玩家追赶，或由房主强制结算
+      s.roundEndsAt = null;
+    } else if (s.roundDuration > 0) {
+      s.roundEndsAt = Date.now() + s.roundDuration;
+    } else {
+      s.roundEndsAt = null;
+    }
+    this.refreshRoundState(s);
+  }
+
+  // 单轮超时：在线但未选完的参赛者，未选对阵随机晋级，然后自动进入下一轮。
+  // 离线玩家的未选对阵保留原样，回归后逐轮追赶。
+  timeoutRound(s) {
+    let touched = false;
+    for (const p of Object.values(s.participants)) {
+      if (!p.inGame || !p.online || p.progress !== s.currentRound) continue;
+      if (this.autoFillRound(p)) touched = true;
+    }
+    s.roundEndsAt = null;
+    s.lastEvent = "第 " + (s.currentRound + 1) + " 轮超时，未选对阵已随机晋级";
+    if (touched) this.refreshRoundState(s);
+    // 超时即结束当前轮：直接推进（若刚好全员结束则上面已 finishGame）
+    if (s.phase === "playing" && s.currentRound < s.totalRounds) {
+      this.advanceRound(s);
+    }
+  }
+
+  // 对外公开的状态。viewerId 为当前观看着（WebSocket 连接身份 / ?viewer=）；
+  // 隐藏模式下，其他人未公开的选择不下发，只标记 hidden。
+  publicView(s, viewerId) {
+    const active = Object.values(s.participants).filter((p) => p.inGame);
+    const hidePicks = s.phase === "playing" && !s.revealPicks;
+    const participants = Object.values(s.participants).map((p) => {
+      const base = {
+        id: p.id,
+        name: p.name,
+        online: p.online,
+        inGame: p.inGame,
+        ready: !!p.ready,
+        playerRound: p.progress, // 该玩家当前所处的轮（落后于共享轮时正在追赶）
+        behind: p.inGame && s.phase === "playing" && p.progress < s.currentRound,
+        survivorCount: (p.survivors || []).length,
+      };
+      if (s.phase === "playing" && p.inGame) {
+        const mine = p.id === viewerId;
+        base.pairs = this.pairsOf(p).map((pr, i) => {
+          const pick = p.picks[i] != null ? p.picks[i] : null;
+          const hidden = hidePicks && !mine && pick != null;
+          return { a: pr.a, b: pr.b, pick: hidden ? null : pick, hidden };
+        });
+      }
+      // 已角逐出最终歌曲（或全场结束）→ 永远公开
+      if (
+        p.inGame &&
+        (s.phase === "finished" ||
+          (s.phase === "playing" && s.totalRounds > 0 && p.progress >= s.totalRounds))
+      ) {
+        base.champion = p.champion != null ? p.champion : p.survivors[0] || null;
       }
       return base;
     });
     return {
       phase: s.phase,
       notice: s.notice || null,
+      lastEvent: s.lastEvent || null,
       currentRound: s.currentRound,
       totalRounds: s.totalRounds,
       roundComplete: s.roundComplete,
-      songs: s.songs,
-      inGameCount: inGame.length,
+      roundDuration: s.roundDuration,
+      roundEndsAt: s.roundEndsAt || null,
+      serverNow: Date.now(),
+      revealPicks: !!s.revealPicks,
+      hostId: s.hostId || null,
+      // 收集阶段需要歌手/添加者信息；对局中只需要歌名（减小广播体积）
+      songs:
+        s.phase === "collecting"
+          ? s.songs
+          : s.songs.map((x) => ({ id: x.id, title: x.title })),
+      inGameCount: active.length,
+      readyCount: active.filter((p) => p.ready || p.id === s.hostId).length,
+      pendingCount:
+        s.phase === "playing" ? active.filter((p) => p.progress < s.totalRounds).length : 0,
       participants,
     };
   }
@@ -129,6 +304,10 @@ export class Room {
       name: p.name,
       online: p.online,
       inGame: p.inGame,
+      ready: !!p.ready,
+      host: p.id === s.hostId,
+      playerRound: p.progress,
+      behind: p.inGame && s.phase === "playing" && p.progress < s.currentRound,
       survivors: (p.survivors || []).length,
       champion: p.champion ? this.songTitle(p.champion, s) : null,
     }));
@@ -142,9 +321,14 @@ export class Room {
       name,
       phase: s.phase,
       notice: s.notice || null,
+      lastEvent: s.lastEvent || null,
       currentRound: s.currentRound,
       totalRounds: s.totalRounds,
       roundComplete: s.roundComplete,
+      roundDuration: s.roundDuration,
+      roundEndsAt: s.roundEndsAt || null,
+      revealPicks: !!s.revealPicks,
+      hostId: s.hostId || null,
       songCount: songs.length,
       onlineCount: participants.filter((p) => p.online).length,
       participantCount: participants.length,
@@ -159,16 +343,21 @@ export class Room {
     let ok = true;
     let msg = "ok";
 
-    const recomputeRoundComplete = () => {
-      const inGame = Object.values(s.participants).filter((p) => p.inGame);
-      s.roundComplete =
-        inGame.length > 0 && inGame.every((p) => this.hasPickedAll(s, p));
-    };
     const purgeSurvivors = (songId) => {
       for (const p of Object.values(s.participants)) {
         if (!p.inGame) continue;
         p.survivors = (p.survivors || []).filter((x) => x !== songId);
-        p.picks = {};
+        p.picks = []; // 对阵结构变了，本轮选择作废重选
+      }
+    };
+    const transferHostIfNeeded = (leaverId) => {
+      if (s.hostId !== leaverId) return;
+      const next = Object.values(s.participants)
+        .filter((p) => p.online && p.id !== leaverId)
+        .sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0))[0];
+      if (next) {
+        s.hostId = next.id;
+        s.lastEvent = next.name + " 成为新房主";
       }
     };
 
@@ -182,7 +371,7 @@ export class Room {
         }
         s.songs = s.songs.filter((x) => x.id !== id);
         purgeSurvivors(id); // 同步从每个人的幸存列表/选择里剔除
-        if (s.phase === "playing") s.roundComplete = false;
+        if (s.phase === "playing") this.refreshRoundState(s);
         break;
       }
       case "remove_participant": {
@@ -193,7 +382,8 @@ export class Room {
           break;
         }
         delete s.participants[pid];
-        if (s.phase === "playing") recomputeRoundComplete();
+        transferHostIfNeeded(pid);
+        if (s.phase === "playing") this.refreshRoundState(s);
         break;
       }
       case "clear_songs": {
@@ -203,10 +393,14 @@ export class Room {
         s.currentRound = 0;
         s.totalRounds = 0;
         s.roundComplete = false;
+        s.roundEndsAt = null;
+        s.lastEvent = null;
         for (const p of Object.values(s.participants)) {
           p.inGame = true;
+          p.ready = false;
+          p.progress = 0;
           p.survivors = [];
-          p.picks = {};
+          p.picks = [];
           p.champion = null;
         }
         break;
@@ -217,10 +411,14 @@ export class Room {
         s.currentRound = 0;
         s.totalRounds = 0;
         s.roundComplete = false;
+        s.roundEndsAt = null;
+        s.lastEvent = null;
         for (const p of Object.values(s.participants)) {
           p.inGame = true;
+          p.ready = false;
+          p.progress = 0;
           p.survivors = [];
-          p.picks = {};
+          p.picks = [];
           p.champion = null;
         }
         break;
@@ -232,10 +430,12 @@ export class Room {
         s.currentRound = 0;
         s.totalRounds = 0;
         s.roundComplete = false;
+        s.roundEndsAt = null;
         s.participants = {};
+        s.hostId = null;
         s.emptySince = null;
         s.notice = null;
-        this.cancelEviction();
+        s.lastEvent = null;
         break;
       }
       case "notice": {
@@ -249,21 +449,41 @@ export class Room {
 
     if (ok) {
       await this.state.storage.put("state", s);
+      this.scheduleAlarm(s);
       await this.broadcast(s); // 实时推送给房间内所有人
     }
     return { ok, msg };
   }
 
-  // 向房间内所有 WebSocket 客户端广播
+  // 向房间内所有 WebSocket 客户端广播。
+  // 隐藏模式下按观看者身份分别序列化，避免把别人未公开的选择发出去。
   async broadcast(s) {
-    const payload = JSON.stringify({ type: "state", state: this.publicView(s) });
     const socks = this.state.getWebSockets();
+    if (socks.length === 0) return;
+    const perViewer = s.phase === "playing" && !s.revealPicks;
+    let payload = null;
+    if (!perViewer) payload = JSON.stringify({ type: "state", state: this.publicView(s) });
     for (const ws of socks) {
       try {
-        ws.send(payload);
+        const data = perViewer
+          ? JSON.stringify({
+              type: "state",
+              state: this.publicView(s, (ws.deserializeAttachment() || {}).id),
+            })
+          : payload;
+        ws.send(data);
       } catch {
         // 忽略已失效的连接
       }
+    }
+  }
+
+  // 给单个连接回消息（错误提示 / 开始前的警告等）
+  sendTo(ws, obj) {
+    try {
+      ws.send(JSON.stringify(obj));
+    } catch {
+      // ignore
     }
   }
 
@@ -298,10 +518,10 @@ export class Room {
       return jsonRes(await this.listRooms());
     }
 
-    // —— HTTP GET /state：轮询回退 & 初始加载 ——
+    // —— HTTP GET /state：轮询回退 & 初始加载（?viewer= 传入自己的 id，隐藏模式下才看得到自己的选择）——
     if (request.method === "GET" || request.method === "HEAD") {
       const s = await this.getState();
-      return jsonRes(this.publicView(s));
+      return jsonRes(this.publicView(s, url.searchParams.get("viewer") || null));
     }
 
     return new Response("Method Not Allowed", { status: 405 });
@@ -333,10 +553,14 @@ export class Room {
     return { rooms };
   }
 
-  // 新连接建立后立即把当前状态推给它
+  // 新连接建立后立即把当前状态推给它（尚未上报身份，按陌生人过滤隐藏项）
   async webSocketOpen(ws) {
     const s = await this.getState();
-    this.cancelEviction(); // 有连接打开 = 房间非空，取消空闲清理
+    if (s.emptySince != null) {
+      s.emptySince = null; // 有连接打开 = 房间非空
+      await this.state.storage.put("state", s);
+    }
+    this.scheduleAlarm(s);
     try {
       ws.send(JSON.stringify({ type: "state", state: this.publicView(s) }));
     } catch {
@@ -367,14 +591,17 @@ export class Room {
       const existing = s.participants[id];
       if (!existing) {
         // 收集阶段加入 = 参赛；游戏中/已结束加入 = 旁观，等下一局
-        const inGame = s.phase === "collecting";
+        s.joinSeq = (s.joinSeq || 0) + 1;
         s.participants[id] = {
           id,
           name,
           online: true,
-          inGame,
+          inGame: s.phase === "collecting",
+          ready: false,
+          joinedAt: s.joinSeq,
+          progress: 0,
           survivors: [],
-          picks: {},
+          picks: [],
           champion: null,
         };
       } else {
@@ -383,18 +610,59 @@ export class Room {
         // 已在房间的老用户，若处于收集阶段且之前是旁观，则转为参赛
         if (s.phase === "collecting") existing.inGame = true;
       }
+      // 没有房主时（新房 / 房主被清理），先进来的人就是房主
+      if (!s.hostId) s.hostId = id;
       s.emptySince = null; // 有人在线，取消空闲清理计时
-      this.cancelEviction();
       changed = true;
     } else if (att.id && s.participants[att.id]) {
       const me = s.participants[att.id];
+      const isHost = att.id === s.hostId;
 
-      if (msg.type === "add_song" && s.phase === "collecting") {
-        const title = String(msg.title || "").trim().slice(0, 80);
-        const artist = String(msg.artist || "").trim().slice(0, 80);
-        if (title) {
-          s.songs.push({ id: crypto.randomUUID(), title, artist, addedBy: att.id });
+      if (msg.type === "rename") {
+        const name = String(msg.name || "").trim().slice(0, 24);
+        if (name) {
+          me.name = name;
           changed = true;
+        }
+      } else if (msg.type === "ready" && s.phase === "collecting" && me.inGame) {
+        // 准备 / 取消准备：准备后的玩家不能再添加歌曲
+        me.ready = !me.ready;
+        changed = true;
+      } else if (msg.type === "add_song" && s.phase === "collecting") {
+        if (me.ready) {
+          this.sendTo(ws, { type: "error", message: "你已准备，不能添加歌曲（取消准备后即可）" });
+        } else {
+          const title = String(msg.title || "").trim().slice(0, 80);
+          const artist = String(msg.artist || "").trim().slice(0, 80);
+          if (title) {
+            s.songs.push({ id: crypto.randomUUID(), title, artist, addedBy: att.id });
+            changed = true;
+          }
+        }
+      } else if (msg.type === "import_songs" && s.phase === "collecting") {
+        // 批量导入（网易云歌单）：与房单里去重
+        if (me.ready) {
+          this.sendTo(ws, { type: "error", message: "你已准备，不能添加歌曲（取消准备后即可）" });
+        } else {
+          const list = Array.isArray(msg.songs) ? msg.songs.slice(0, 100) : [];
+          const seen = new Set(s.songs.map((x) => (x.title + "|" + x.artist).toLowerCase()));
+          let added = 0;
+          let skipped = 0;
+          for (const it of list) {
+            const title = String((it && it.title) || "").trim().slice(0, 80);
+            const artist = String((it && it.artist) || "").trim().slice(0, 80);
+            if (!title) continue;
+            const key = (title + "|" + artist).toLowerCase();
+            if (seen.has(key)) {
+              skipped++;
+              continue;
+            }
+            seen.add(key);
+            s.songs.push({ id: crypto.randomUUID(), title, artist, addedBy: att.id });
+            added++;
+          }
+          if (added > 0) changed = true;
+          this.sendTo(ws, { type: "imported", added, skipped });
         }
       } else if (msg.type === "remove_song" && s.phase === "collecting") {
         s.songs = s.songs.filter((x) => x.id !== msg.songId);
@@ -402,89 +670,127 @@ export class Room {
       } else if (msg.type === "clear_songs" && s.phase === "collecting") {
         s.songs = [];
         changed = true;
-      } else if (msg.type === "rename") {
-        const name = String(msg.name || "").trim().slice(0, 24);
-        if (name) {
-          me.name = name;
+      } else if (msg.type === "set_duration" && s.phase === "collecting") {
+        if (!isHost) {
+          this.sendTo(ws, { type: "error", message: "只有房主可以设置单轮时长" });
+        } else {
+          const d = Number(msg.duration);
+          if (ROUND_DURATIONS.indexOf(d) >= 0) {
+            s.roundDuration = d;
+            changed = true;
+          }
+        }
+      } else if (msg.type === "set_reveal") {
+        // 每轮选择公开/隐藏：房主可随时切换（对下一帧广播生效）
+        if (!isHost) {
+          this.sendTo(ws, { type: "error", message: "只有房主可以切换公开/隐藏" });
+        } else {
+          s.revealPicks = !!msg.value;
           changed = true;
         }
       } else if (msg.type === "start" && s.phase === "collecting") {
-        // 必须偶数首且至少 2 首才能开始
-        if (s.songs.length >= 2 && s.songs.length % 2 === 0) {
-          const ids = s.songs.map((x) => x.id);
-          // 洗牌，让对阵更随机公平
-          for (let i = ids.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [ids[i], ids[j]] = [ids[j], ids[i]];
-          }
-          for (const p of Object.values(s.participants)) {
-            if (p.inGame) {
-              p.survivors = ids.slice();
-              p.picks = {};
-              p.champion = null;
+        if (!isHost) {
+          this.sendTo(ws, { type: "error", message: "只有房主可以开始游戏" });
+        } else if (s.songs.length < 2 || s.songs.length % 2 !== 0) {
+          this.sendTo(ws, { type: "error", message: "歌曲数量需为偶数且至少 2 首才能开始" });
+        } else {
+          const active = Object.values(s.participants).filter((p) => p.inGame);
+          const readyCount = active.filter((p) => p.ready || p.id === s.hostId).length;
+          const need = Math.ceil((active.length * 2) / 3);
+          if (!msg.force && readyCount < need) {
+            // 准备不足 2/3：只警告，房主确认后可带 force 重发
+            this.sendTo(ws, {
+              type: "warning",
+              action: "start",
+              message:
+                "仅 " + readyCount + " / " + active.length + " 人准备（不足 2/3），确定强行开始吗？",
+            });
+          } else {
+            const ids = s.songs.map((x) => x.id);
+            // 洗牌，让对阵更随机公平（所有人的对阵保持一致，便于横向比较）
+            for (let i = ids.length - 1; i > 0; i--) {
+              const j = Math.floor(Math.random() * (i + 1));
+              [ids[i], ids[j]] = [ids[j], ids[i]];
             }
+            for (const p of Object.values(s.participants)) {
+              if (!p.inGame) continue;
+              p.survivors = ids.slice();
+              p.picks = [];
+              p.progress = 0;
+              p.champion = null;
+              p.ready = false;
+            }
+            s.phase = "playing";
+            s.currentRound = 0;
+            s.totalRounds = this.computeTotalRounds(ids.length);
+            s.roundComplete = false;
+            s.lastEvent = null;
+            s.roundEndsAt = s.roundDuration > 0 ? Date.now() + s.roundDuration : null;
+            changed = true;
           }
-          s.phase = "playing";
-          s.currentRound = 0;
-          s.totalRounds = this.computeTotalRounds(ids.length);
-          s.roundComplete = false;
-          changed = true;
         }
       } else if (msg.type === "choose" && s.phase === "playing" && me.inGame) {
-        const pairs = this.computePairs(me.survivors);
+        // 选择永远针对「该玩家自己当前所处的那一轮」：
+        // 同步玩家选共享轮；落后玩家在追赶旧轮，可连续选择
+        const pairs = this.pairsOf(me);
         const idx = Number(msg.pairIndex);
         const pr = pairs[idx];
-        if (pr && pr.b !== null) {
-          const pick = String(msg.songId || "");
-          if (pick === pr.a || pick === pr.b) {
-            me.picks[idx] = pick;
-            changed = true;
-            // 检查是否全员已完成本轮选择
-            const inGame = Object.values(s.participants).filter((p) => p.inGame);
-            s.roundComplete = inGame.length > 0 && inGame.every((p) => this.hasPickedAll(s, p));
-          }
+        const pick = String(msg.songId || "");
+        if (pr && pr.b !== null && (pick === pr.a || pick === pr.b)) {
+          me.picks[idx] = pick;
+          changed = true;
         }
-      } else if (msg.type === "next_round" && s.phase === "playing" && s.roundComplete) {
-        // 本回合全员选完，进入下一轮筛除
-        for (const p of Object.values(s.participants)) {
-          if (!p.inGame) continue;
-          const pairs = this.computePairs(p.survivors);
-          const next = [];
-          pairs.forEach((pr, idx) => {
-            if (pr.b === null) next.push(pr.a); // 轮空自动晋级
-            else next.push(p.picks[idx] != null ? p.picks[idx] : pr.a);
-          });
-          p.survivors = next;
-          p.picks = {};
+        // 选完当前轮（或只剩轮空）即结算推进个人进度，并重算共享轮状态
+        if (this.refreshRoundState(s)) changed = true;
+      } else if (msg.type === "next_round" && s.phase === "playing") {
+        if (!isHost) {
+          this.sendTo(ws, { type: "error", message: "只有房主可以进入下一轮" });
+        } else if (!s.roundComplete) {
+          this.sendTo(ws, { type: "error", message: "本轮还有人在选择，稍候" });
+        } else if (s.currentRound < s.totalRounds) {
+          s.lastEvent = null; // 房主主动开新轮：清掉上一轮的事件提示
+          this.advanceRound(s);
+          changed = true;
         }
-        s.currentRound += 1;
-        const inGame = Object.values(s.participants).filter((p) => p.inGame);
-        const allOne = inGame.length > 0 && inGame.every((p) => p.survivors.length === 1);
-        if (allOne || s.currentRound >= s.totalRounds) {
-          s.phase = "finished";
-          for (const p of inGame) p.champion = p.survivors[0] || null;
+      } else if (msg.type === "force_settle" && s.phase === "playing") {
+        // 房主强制结算：还没追赶完的玩家按随机评选出最终歌曲
+        if (!isHost) {
+          this.sendTo(ws, { type: "error", message: "只有房主可以强制结算" });
         } else {
-          s.roundComplete = false;
+          for (const p of Object.values(s.participants)) {
+            if (p.inGame && p.progress < s.totalRounds) this.autoFinishPlayer(s, p);
+          }
+          s.lastEvent = "房主强制结算：未追赶完的玩家已随机评选";
+          this.refreshRoundState(s);
+          changed = true;
         }
-        changed = true;
       } else if (msg.type === "reset") {
-        // 回到收集阶段，保留歌单，清空战绩，准备下一局
-        s.phase = "collecting";
-        s.currentRound = 0;
-        s.totalRounds = 0;
-        s.roundComplete = false;
-        for (const p of Object.values(s.participants)) {
-          p.inGame = true;
-          p.survivors = [];
-          p.picks = {};
-          p.champion = null;
+        if (!isHost) {
+          this.sendTo(ws, { type: "error", message: "只有房主可以重置对局" });
+        } else {
+          // 回到收集阶段，保留歌单，清空战绩，准备下一局
+          s.phase = "collecting";
+          s.currentRound = 0;
+          s.totalRounds = 0;
+          s.roundComplete = false;
+          s.roundEndsAt = null;
+          s.lastEvent = null;
+          for (const p of Object.values(s.participants)) {
+            p.inGame = true;
+            p.ready = false;
+            p.progress = 0;
+            p.survivors = [];
+            p.picks = [];
+            p.champion = null;
+          }
+          changed = true;
         }
-        changed = true;
       }
     }
 
     if (changed) {
       await this.state.storage.put("state", s);
+      this.scheduleAlarm(s);
       await this.broadcast(s);
     }
   }
@@ -496,12 +802,24 @@ export class Room {
       const me = s.participants[att.id];
       if (me) {
         me.online = false;
-        if (!this.anyOnline(s)) {
-          // 最后一人离开：记下时间，30 分钟后若仍无人则清除歌单缓存
-          if (s.emptySince == null) s.emptySince = Date.now();
-          this.scheduleEviction(s);
+        // 房主掉线：转交给最早加入且仍在线的玩家（无人在线则保持原房主）
+        if (s.hostId === att.id) {
+          const next = Object.values(s.participants)
+            .filter((p) => p.online && p.id !== att.id)
+            .sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0))[0];
+          if (next) {
+            s.hostId = next.id;
+            s.lastEvent = next.name + " 成为新房主";
+          }
         }
+        if (!this.anyOnline(s) && s.emptySince == null) {
+          // 最后一人离开：记下时间，30 分钟后若仍无人则清除歌单缓存
+          s.emptySince = Date.now();
+        }
+        // 离线玩家不再阻塞当前轮
+        this.refreshRoundState(s);
         await this.state.storage.put("state", s);
+        this.scheduleAlarm(s);
         await this.broadcast(s);
       }
     }
@@ -516,35 +834,61 @@ export class Room {
     await this.webSocketClose(ws);
   }
 
-  // Durable Object Alarm：到时间后检查是否仍空房，是则清除歌单缓存
+  // Durable Object Alarm：轮次截止 / 空闲清理（共用一个槽位，到点后分别处理）
   async alarm() {
     const s = await this.getState();
-    if (this.anyOnline(s)) {
-      s.emptySince = null;
-      this.cancelEviction(); // 有人回来了，撤销清理
-      await this.state.storage.put("state", s);
-      return;
+    const now = Date.now();
+    let changed = false;
+
+    // 1) 单轮限时到点：随机结算未选对阵并自动进入下一轮
+    if (
+      s.phase === "playing" &&
+      s.roundDuration > 0 &&
+      s.roundEndsAt &&
+      !s.roundComplete &&
+      s.currentRound < s.totalRounds &&
+      now >= s.roundEndsAt
+    ) {
+      this.timeoutRound(s);
+      changed = true;
     }
-    const deadline = (s.emptySince ?? Date.now()) + this.EVICT_AFTER_MS;
-    if (Date.now() >= deadline) {
-      // 30 分钟无人在线：清除歌单缓存并重置对局（保留离线参与者记录）
-      s.songs = [];
-      s.phase = "collecting";
-      s.currentRound = 0;
-      s.totalRounds = 0;
-      s.roundComplete = false;
-      for (const p of Object.values(s.participants)) {
-        p.inGame = true;
-        p.survivors = [];
-        p.picks = {};
-        p.champion = null;
+
+    // 2) 空闲清理
+    if (this.anyOnline(s)) {
+      if (s.emptySince != null) {
+        s.emptySince = null;
+        changed = true;
       }
-      s.emptySince = null;
-      this.cancelEviction();
+    } else {
+      const deadline = (s.emptySince ?? now) + this.EVICT_AFTER_MS;
+      if (now >= deadline) {
+        // 30 分钟无人在线：清除歌单缓存并重置对局（保留离线参与者记录）
+        s.songs = [];
+        s.phase = "collecting";
+        s.currentRound = 0;
+        s.totalRounds = 0;
+        s.roundComplete = false;
+        s.roundEndsAt = null;
+        s.lastEvent = null;
+        for (const p of Object.values(s.participants)) {
+          p.inGame = true;
+          p.ready = false;
+          p.progress = 0;
+          p.survivors = [];
+          p.picks = [];
+          p.champion = null;
+        }
+        // 房间已清空重启：房主名额释放，下一个进来的人接任
+        s.hostId = null;
+        s.emptySince = null;
+        changed = true;
+      }
+    }
+
+    if (changed) {
       await this.state.storage.put("state", s);
       await this.broadcast(s);
-    } else {
-      this.scheduleEviction(s); // 还没到时间，按原 deadline 重新排期
     }
+    this.scheduleAlarm(s);
   }
 }
