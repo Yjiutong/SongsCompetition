@@ -257,19 +257,44 @@ function resetGame() {
 let libArtist = null;
 let libQuery = "";
 
+// 曲库数据：优先用服务端下发的；脚本加载时先以静态回退填好，保证弹窗能立刻打开。
+// 打开弹窗后会异步从 /api/library 拉最新（管理员在后台改过的会实时同步）。
+let LIB_GROUPS = (typeof SONG_LIBRARY_GROUPS !== "undefined" && SONG_LIBRARY_GROUPS) || [];
+let LIB_DATA = (typeof SONG_LIBRARY !== "undefined" && SONG_LIBRARY) || {};
+let LIB_SONGS = (typeof SONG_LIBRARY_SONGS !== "undefined" && SONG_LIBRARY_SONGS) || {};
+
 // 曲库里的第一个名字（默认选中），供打开弹窗时用
 function firstLibraryName() {
-  const group = SONG_LIBRARY_GROUPS[0];
+  const group = LIB_GROUPS[0];
   if (!group) return null;
-  return Object.keys(SONG_LIBRARY[group])[0] || null;
+  return Object.keys(LIB_DATA[group] || {})[0] || null;
 }
 
 function openLibrary() {
   libQuery = "";
-  document.getElementById("libSearch").value = "";
+  const sb = document.getElementById("libSearch");
+  if (sb) sb.value = "";
   libArtist = firstLibraryName();
   document.getElementById("libraryModal").style.display = "flex";
   renderLibrary();
+  // 后台拉取最新曲库（管理员可能改过），拉到后若弹窗还开着就刷新
+  fetch("/api/library")
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) => {
+      if (j && Array.isArray(j.groups) && j.data) {
+        LIB_GROUPS = j.groups;
+        LIB_DATA = j.data || {};
+        LIB_SONGS = {};
+        for (const g of LIB_GROUPS) {
+          for (const n of Object.keys(LIB_DATA[g] || {})) LIB_SONGS[n] = LIB_DATA[g][n];
+        }
+        if (document.getElementById("libraryModal").style.display === "flex") {
+          if (!LIB_SONGS[libArtist]) libArtist = firstLibraryName();
+          renderLibrary();
+        }
+      }
+    })
+    .catch(() => {});
 }
 function closeLibrary() {
   document.getElementById("libraryModal").style.display = "none";
@@ -281,12 +306,12 @@ function renderLibrary() {
   const hit = (name) =>
     !libQuery ||
     name.toLowerCase().includes(libQuery) ||
-    SONG_LIBRARY_SONGS[name].some((t) => t.toLowerCase().includes(libQuery));
+    (LIB_SONGS[name] || []).some((t) => t.toLowerCase().includes(libQuery));
 
   // 左侧：按分类分组列出歌手 / 作者（没有任何命中的整组不显示）
   const grouped = [];
-  for (const group of SONG_LIBRARY_GROUPS) {
-    const names = Object.keys(SONG_LIBRARY[group]).filter(hit);
+  for (const group of LIB_GROUPS) {
+    const names = Object.keys(LIB_DATA[group] || {}).filter(hit);
     if (names.length) grouped.push([group, names]);
   }
   const artistBox = document.getElementById("libArtists");
@@ -305,7 +330,7 @@ function renderLibrary() {
       label.textContent = name;
       const count = document.createElement("span");
       count.className = "lib-artist-count";
-      count.textContent = SONG_LIBRARY_SONGS[name].length;
+      count.textContent = (LIB_SONGS[name] || []).length;
       item.appendChild(label);
       item.appendChild(count);
       item.onclick = () => {
@@ -322,7 +347,7 @@ function renderLibrary() {
   // 右侧：歌曲列表
   const songBox = document.getElementById("libSongs");
   songBox.textContent = "";
-  const songs = SONG_LIBRARY_SONGS[libArtist] || [];
+  const songs = LIB_SONGS[libArtist] || [];
   // 搜索词命中歌手/作者名时，就把他的歌全部列出来；只有搜的是歌名时才按歌名过滤
   const nameHit = !!libQuery && !!libArtist && libArtist.toLowerCase().includes(libQuery);
   const shown = !libQuery || nameHit ? songs : songs.filter((t) => t.toLowerCase().includes(libQuery));

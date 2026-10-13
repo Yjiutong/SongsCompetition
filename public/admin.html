@@ -58,6 +58,29 @@
   .hidden{display:none!important}
   .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
   .toolbar .grow{flex:1}
+  /* 顶部 Tab */
+  .tabs{display:flex;gap:6px}
+  .tab{background:transparent;border:1px solid var(--line);color:var(--muted);
+    border-radius:8px;padding:7px 14px;font-size:13px}
+  .tab:hover{color:var(--text);border-color:var(--gold-soft)}
+  .tab.active{background:linear-gradient(180deg,#f0d27e,#caa64a);color:#231a08;
+    border-color:#caa64a;font-weight:700}
+  /* 预制曲库 */
+  #libGroups{margin-top:12px;display:flex;flex-direction:column;gap:14px}
+  .lib-card{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+  .lib-card .lc-head{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+  .lib-card .lc-name{font-size:15px;color:var(--gold);font-weight:700}
+  .lib-card .lc-count{font-size:12px;color:var(--muted)}
+  .lib-entries{display:flex;flex-direction:column;gap:8px;margin-top:6px;padding-left:4px}
+  .lib-entry{background:#16110b;border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+  .lib-entry .le-head{display:flex;align-items:center;gap:8px}
+  .lib-entry .le-name{font-size:13.5px;color:var(--text);font-weight:600}
+  .lib-entry .le-count{font-size:12px;color:var(--muted)}
+  .lib-songs{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .lib-chip{display:inline-flex;align-items:center;gap:6px;background:#0d0b07;
+    border:1px solid var(--line);border-radius:999px;padding:3px 6px 3px 10px;font-size:12.5px}
+  .lib-chip button{padding:1px 7px;font-size:11px}
+  .lib-card .acts,.lib-entry .acts{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
   .notice-row{display:flex;gap:8px;margin-top:10px}
   .badge{font-size:11px;color:var(--muted);border:1px solid var(--line);
     border-radius:6px;padding:2px 7px}
@@ -83,11 +106,18 @@
       <h1>房间管理后台</h1>
       <div class="sub">管控所有房间的参与者与歌单 · 数据实时同步</div>
     </div>
+    <div class="tabs">
+      <button id="tabRooms" class="tab active" onclick="switchTab('rooms')">房间</button>
+      <button id="tabLib" class="tab" onclick="switchTab('lib')">预制曲库</button>
+    </div>
+    <div class="grow"></div>
     <div>
       <button onclick="logout()">退出</button>
     </div>
   </div>
 
+  <!-- 房间面板 -->
+  <div id="roomsPanel">
   <div class="card">
     <div class="toolbar">
       <input type="search" id="filter" placeholder="过滤房间名…" oninput="renderRooms()" />
@@ -134,6 +164,23 @@
       <thead><tr><th>歌名</th><th>歌手</th><th>添加者</th><th>操作</th></tr></thead>
       <tbody id="songsBody"></tbody>
     </table>
+  </div>
+  </div>
+
+  <!-- 预制曲库面板 -->
+  <div id="libPanel" class="hidden">
+    <div class="card">
+      <div class="toolbar">
+        <input type="search" id="libFilter" placeholder="过滤分类 / 条目 / 歌名…" oninput="renderLibraryAdmin()" />
+        <button class="primary" onclick="loadLibrary()">重新加载</button>
+        <div class="grow"></div>
+        <button onclick="libAddGroup()">＋ 新增分类</button>
+        <button onclick="libReset()" class="danger">恢复默认曲库</button>
+      </div>
+      <div class="badge" id="libStat"></div>
+      <div class="ok hidden" id="libMsg"></div>
+      <div id="libGroups"></div>
+    </div>
   </div>
 </div>
 

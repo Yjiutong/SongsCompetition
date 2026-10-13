@@ -517,6 +517,14 @@ export class Room {
     if (url.pathname === "/__index/list") {
       return jsonRes(await this.listRooms());
     }
+    // 预制曲库（全局，存在索引实例里）：后台可编辑，客户端拉取
+    if (url.pathname === "/__index/library" && request.method === "GET") {
+      return jsonRes((await this.getLibrary()) || {});
+    }
+    if (url.pathname === "/__index/library/action" && request.method === "POST") {
+      const b = await bodyJson(request);
+      return jsonRes(await this.libraryAction(b.action || "", b.payload || {}));
+    }
 
     // —— HTTP GET /state：轮询回退 & 初始加载（?viewer= 传入自己的 id，隐藏模式下才看得到自己的选择）——
     if (request.method === "GET" || request.method === "HEAD") {
@@ -551,6 +559,143 @@ export class Room {
     const rooms = Object.entries(idx).map(([name, lastSeen]) => ({ name, lastSeen }));
     rooms.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
     return { rooms };
+  }
+
+  // ===== 预制曲库（仅供保留实例 __rooms_index__ 使用）=====
+  // 管理员在后台增删改的「全局预设曲库」，持久化在索引实例的 storage["library"] 里。
+  // 客户端打开曲库弹窗时从 Worker 的 /api/library 拉取，而非读取前端静态文件，
+  // 这样后台的改动能实时同步给所有房间。格式：{ groups:[分类名], data:{ 分类:{ 条目名:[歌名] } } }
+  async getLibrary() {
+    const lib = await this.state.storage.get("library");
+    if (lib && Array.isArray(lib.groups) && lib.data && typeof lib.data === "object") return lib;
+    return null; // 未播种：由 Worker 从 library.json 资产播种
+  }
+
+  // 校验并整体写入曲库（用于 set / reset 后回写）
+  async setLibrary(lib) {
+    if (!lib || typeof lib !== "object" || !Array.isArray(lib.groups) || typeof lib.data !== "object") {
+      return { ok: false, msg: "曲库格式不正确" };
+    }
+    const data = {};
+    for (const g of lib.groups) data[g] = lib.data[g] || {};
+    await this.state.storage.put("library", { groups: lib.groups.slice(), data });
+    return { ok: true };
+  }
+
+  // 单条增删改操作；返回 { ok, msg? }
+  async libraryAction(action, payload = {}) {
+    const norm = (s) => String(s == null ? "" : s).trim();
+    let lib = await this.getLibrary();
+    if (!lib) lib = { groups: [], data: {} }; // 尚未播种也允许后台直接编辑（会先建空壳）
+    const groups = lib.groups.slice();
+    const data = {};
+    // 统一成 { 分类: { 条目: [歌名] } }；容错：缺条目时补空对象
+    for (const g of groups) {
+      const raw = lib.data[g];
+      data[g] = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    }
+
+    switch (action) {
+      case "add_group": {
+        const g = norm(payload.group);
+        if (!g) return { ok: false, msg: "分类名不能为空" };
+        if (groups.includes(g)) return { ok: false, msg: "分类已存在" };
+        groups.push(g);
+        data[g] = {};
+        break;
+      }
+      case "rename_group": {
+        const from = norm(payload.from);
+        const to = norm(payload.to);
+        if (!from || !to) return { ok: false, msg: "分类名不能为空" };
+        const i = groups.indexOf(from);
+        if (i < 0) return { ok: false, msg: "分类不存在" };
+        if (from !== to && groups.includes(to)) return { ok: false, msg: "目标分类已存在" };
+        groups[i] = to;
+        data[to] = data[from] || {};
+        delete data[from];
+        break;
+      }
+      case "remove_group": {
+        const g = norm(payload.group);
+        const i = groups.indexOf(g);
+        if (i < 0) return { ok: false, msg: "分类不存在" };
+        groups.splice(i, 1);
+        delete data[g];
+        break;
+      }
+      case "add_entry": {
+        const g = norm(payload.group);
+        const n = norm(payload.name);
+        if (!g || !n) return { ok: false, msg: "分类与名称不能为空" };
+        if (!groups.includes(g)) groups.push(g);
+        data[g] = data[g] || {};
+        if (!data[g][n]) data[g][n] = [];
+        break;
+      }
+      case "rename_entry": {
+        const g = norm(payload.group);
+        const from = norm(payload.from);
+        const to = norm(payload.to);
+        if (!g || !from || !to) return { ok: false, msg: "分类/旧名/新名不能为空" };
+        if (!data[g] || !data[g][from]) return { ok: false, msg: "条目不存在" };
+        data[g][to] = data[g][from];
+        delete data[g][from];
+        break;
+      }
+      case "remove_entry": {
+        const g = norm(payload.group);
+        const n = norm(payload.name);
+        if (data[g]) delete data[g][n];
+        break;
+      }
+      case "add_song": {
+        const g = norm(payload.group);
+        const n = norm(payload.name);
+        const t = norm(payload.title);
+        if (!g || !n || !t) return { ok: false, msg: "分类 / 名称 / 歌名不能为空" };
+        data[g] = data[g] || {};
+        data[g][n] = data[g][n] || [];
+        if (data[g][n].includes(t)) return { ok: false, msg: "这首歌已经在曲库里了" };
+        data[g][n].push(t);
+        break;
+      }
+      case "edit_song": {
+        const g = norm(payload.group);
+        const n = norm(payload.name);
+        const from = norm(payload.from);
+        const to = norm(payload.to);
+        if (!g || !n || !from || !to) return { ok: false, msg: "参数不完整" };
+        if (!data[g] || !data[g][n]) return { ok: false, msg: "条目不存在" };
+        const i = data[g][n].indexOf(from);
+        if (i < 0) return { ok: false, msg: "原歌名不存在" };
+        if (to !== from && data[g][n].includes(to)) return { ok: false, msg: "新歌名已存在" };
+        data[g][n][i] = to;
+        break;
+      }
+      case "remove_song": {
+        const g = norm(payload.group);
+        const n = norm(payload.name);
+        const t = norm(payload.title);
+        if (data[g] && data[g][n]) data[g][n] = data[g][n].filter((x) => x !== t);
+        break;
+      }
+      case "set": {
+        // 整库替换（payload 为 {groups,data}）
+        const r = await this.setLibrary(payload);
+        if (!r.ok) return r;
+        return { ok: true };
+      }
+      case "reset": {
+        // 清空后由 Worker 重新播种默认曲库
+        await this.state.storage.delete("library");
+        return { ok: true, reseeded: false };
+      }
+      default:
+        return { ok: false, msg: "未知操作：" + action };
+    }
+    await this.state.storage.put("library", { groups, data });
+    return { ok: true };
   }
 
   // 新连接建立后立即把当前状态推给它（尚未上报身份，按陌生人过滤隐藏项）

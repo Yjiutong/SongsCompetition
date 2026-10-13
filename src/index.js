@@ -2,11 +2,14 @@
 //  - /ws?room=XXX        -> 升级为 WebSocket，交给对应房间的 Durable Object（并登记房间索引）
 //  - /state?room=XXX      -> 返回房间当前状态（轮询回退 / 初始加载；?reg=1 时登记房间索引）
 //  - /api/netease?url=... -> 抓取网易云歌单的歌曲名与歌手（服务端代抓，前端无跨域问题）
+//  - /api/library         -> 返回当前预制曲库（公开，客户端曲库弹窗从这里拉取；未播种则从 library.json 播种）
 //  - /admin               -> 管理员后台页面（静态资源 admin.html）
 //  - /admin/api/ping      -> 后台自检（需 ADMIN_TOKEN）
 //  - /admin/api/rooms     -> 列出所有房间（需 ADMIN_TOKEN）
 //  - /admin/api/rooms/:name           -> 某房间详情（需 ADMIN_TOKEN）
 //  - /admin/api/rooms/:name/action     -> 对房间执行管理操作（需 ADMIN_TOKEN）
+//  - /admin/api/library                -> 读取全局预制曲库（需 ADMIN_TOKEN）
+//  - /admin/api/library/action         -> 编辑预制曲库 / 恢复默认（需 ADMIN_TOKEN）
 //  - 其它路径            -> 由 Workers Static Assets 提供静态文件（public/）
 
 import { Room } from "./room.js";
@@ -75,6 +78,31 @@ async function listRooms(env) {
     }),
   );
   return views.filter(Boolean);
+}
+
+// 预制曲库：从索引实例读当前曲库；从未播种时从静态资产 library.json 播种并写回
+async function serveLibrary(env, url) {
+  const stored = await callDO(env, INDEX_NAME, "/__index/library");
+  if (stored && Array.isArray(stored.groups) && stored.data && typeof stored.data === "object") {
+    return { groups: stored.groups, data: stored.data };
+  }
+  const seed = await loadSeed(env, url);
+  await callDO(env, INDEX_NAME, "/__index/library/action", postBody({ action: "set", payload: seed }));
+  return seed;
+}
+
+// 默认曲库种子（public/library.json）。资产取不到时退化为空壳，保证接口可用。
+async function loadSeed(env, url) {
+  try {
+    const res = await env.ASSETS.fetch(new URL("/library.json", url.origin));
+    if (res.ok) {
+      const j = await res.json();
+      if (j && Array.isArray(j.groups) && j.data) return j;
+    }
+  } catch {
+    // 资产不可用就用空壳
+  }
+  return { groups: ["虚拟歌姬", "作者"], data: {} };
 }
 
 // 校验管理员令牌：支持 Authorization: Bearer <token> 或 ?token=...
@@ -202,6 +230,12 @@ async function handle(request, env, ctx) {
     return json(await fetchNeteasePlaylist(url.searchParams.get("url") || ""));
   }
 
+  // —— 预制曲库（公开读取，供客户端曲库弹窗使用）——
+  if (p === "/api/library") {
+    if (request.method !== "GET") return json({ error: "Method Not Allowed" }, 405);
+    return json(await serveLibrary(env, url), 200);
+  }
+
   // —— 管理员后台页面（外壳无需鉴权，数据接口才鉴权）——
   if (p === "/admin" || p === "/admin/") {
     const asset = await env.ASSETS.fetch(new URL("/admin.html", url.origin));
@@ -262,6 +296,30 @@ async function handle(request, env, ctx) {
         return json(await callDO(env, name, "/__admin/view", postBody({ name })), 200);
       }
       return json({ error: "Method Not Allowed" }, 405);
+    }
+    // 预制曲库：后台读取与编辑（全局，持久化在索引实例）
+    if (p === "/admin/api/library") {
+      if (request.method !== "GET") return json({ error: "Method Not Allowed" }, 405);
+      return json(await serveLibrary(env, url), 200);
+    }
+    if (p === "/admin/api/library/action") {
+      if (request.method !== "POST") return json({ error: "Method Not Allowed" }, 405);
+      let body = {};
+      try {
+        body = await request.json();
+      } catch {
+        body = {};
+      }
+      const { action, payload } = body;
+      // 恢复默认：先清空存储，再重新播种 library.json
+      if (action === "reset") {
+        await callDO(env, INDEX_NAME, "/__index/library/action", postBody({ action: "reset" }));
+        const seed = await loadSeed(env, url);
+        await callDO(env, INDEX_NAME, "/__index/library/action", postBody({ action: "set", payload: seed }));
+        return json({ ok: true, ...seed }, 200);
+      }
+      const res = await callDO(env, INDEX_NAME, "/__index/library/action", postBody({ action, payload: payload || {} }));
+      return json(res, res && res.ok ? 200 : 400);
     }
     return json({ error: "Not Found" }, 404);
   }
