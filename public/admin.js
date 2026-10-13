@@ -67,6 +67,7 @@ async function doLogin() {
     app.classList.remove("hidden");
     loadRooms();
     ping();
+    startRoomsAutoRefresh();
   } catch (e) {
     err.textContent = e.message || "登录失败";
     err.classList.remove("hidden");
@@ -99,24 +100,33 @@ async function loadRooms() {
   try {
     const j = await apiJson("/admin/api/rooms");
     ROOMS = Array.isArray(j) ? j : [];
+    lastRoomsPayload = JSON.stringify(ROOMS);
     renderRooms();
   } catch (e) {
     body.innerHTML = '<tr><td colspan="6" class="err">加载失败：' + esc(e.message || e) + "</td></tr>";
   }
 }
 
-// 房间行的「删除」按钮：无人在线才可点；有人在线时禁用并说明原因
-// （服务端也会再校验一次，避免后台列表是旧数据时误删）
-function delBtn(x) {
-  const busy = (x.onlineCount || 0) > 0;
-  return (
-    '<button class="tiny danger" onclick="delRoom(\'' +
-    enc(x.name) +
-    '\')"' +
-    (busy ? " disabled title=\"房间内有人在线，暂不能删除\"" : ' title="删除房间，数据不可恢复"') +
-    ">删除</button>"
-  );
-}
+// 房间列表 / 参与者表的点击统一走「事件委托」：房间名放在 data-name 属性里，
+// 浏览器读 dataset 时会自动做 HTML 反转义，拿到的就是原始房间名。
+// 以前的写法是 onclick="openDetail('"+enc(name)+"')"，而 openDetail 内部又会
+// encodeURIComponent 一次 → 中文房间名被编码两次，服务端只解一次，命中的是
+// 另一个空实例（列表显示 1/1、详情却「暂无参与者」，且详情里的操作全打空了）。
+document.getElementById("roomsBody").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-act]");
+  if (!btn) return;
+  const name = btn.dataset.name || "";
+  if (btn.dataset.act === "detail") openDetail(name);
+  else if (btn.dataset.act === "del") delRoom(name);
+});
+document.getElementById("partsBody").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-act='removePart']");
+  if (btn) removePart(btn.dataset.pid);
+});
+document.getElementById("songsBody").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-act='removeSong']");
+  if (btn) removeSong(btn.dataset.id);
+});
 
 function renderRooms() {
   const f = (document.getElementById("filter").value || "").trim().toLowerCase();
@@ -134,10 +144,56 @@ function renderRooms() {
       <td><span class="dot ${x.onlineCount > 0 ? "on" : ""}"></span>${x.onlineCount}/${x.participantCount}</td>
       <td>${x.songCount}</td>
       <td>${x.phase === "playing" ? x.currentRound + 1 + "/" + (x.totalRounds || "?") : "-"}</td>
-      <td><button class="tiny" onclick="openDetail('${enc(x.name)}')">查看 / 管理</button>${delBtn(x)}</td>
+      <td>
+        <button class="tiny" data-act="detail" data-name="${esc(x.name)}">查看 / 管理</button>
+        <button class="tiny danger" data-act="del" data-name="${esc(x.name)}"${
+          (x.onlineCount || 0) > 0 ? ' disabled title="房间内有人在线，暂不能删除"' : ' title="删除房间，数据不可恢复"'
+        }>删除</button>
+      </td>
     </tr>`,
     )
     .join("");
+}
+
+// 用实时详情回填列表里对应的那一行：列表是快照、详情是实时的，
+// 不回填就会出现「列表 1/1、详情空房间」这种对不上的观感。
+function patchRoomRow(x) {
+  const i = ROOMS.findIndex((r) => r.name === x.name);
+  if (i < 0) return;
+  ROOMS[i] = {
+    ...ROOMS[i],
+    phase: x.phase,
+    onlineCount: x.onlineCount,
+    participantCount: x.participantCount,
+    songCount: x.songCount,
+    currentRound: x.currentRound,
+    totalRounds: x.totalRounds,
+  };
+  renderRooms();
+}
+
+// 列表自动刷新：在线人数/歌曲数一直在变，只靠手动刷新数字会过期。
+// 带变更检测——数据和上次一样就不重绘，避免无意义的 DOM 抖动。
+let lastRoomsPayload = "";
+let roomsTimer = null;
+async function refreshRoomsQuietly() {
+  const panel = document.getElementById("roomsPanel");
+  if (panel.classList.contains("hidden") || document.hidden) return;
+  try {
+    const j = await apiJson("/admin/api/rooms");
+    if (!Array.isArray(j)) return;
+    const payload = JSON.stringify(j);
+    if (payload === lastRoomsPayload) return; // 没变化就不动 DOM
+    lastRoomsPayload = payload;
+    ROOMS = j;
+    renderRooms();
+  } catch {
+    // 刷新失败就保留旧数据，不打扰用户
+  }
+}
+function startRoomsAutoRefresh() {
+  if (roomsTimer) return;
+  roomsTimer = setInterval(refreshRoomsQuietly, 10000);
 }
 
 // 删除房间：仅无人在线时可删（服务端以实时状态为准再校验）。
@@ -188,7 +244,7 @@ async function openDetail(name) {
           <td>${p.inGame ? "是" : "否"}</td>
           <td>${p.survivors}</td>
           <td>${esc(p.champion || "-")}</td>
-          <td><button class="tiny danger" onclick="removePart('${p.id}')">移除</button></td>
+          <td><button class="tiny danger" data-act="removePart" data-pid="${esc(p.id)}">移除</button></td>
         </tr>`,
         )
         .join("");
@@ -204,11 +260,12 @@ async function openDetail(name) {
           <td>${esc(s.title)}</td>
           <td>${esc(s.artist || "-")}</td>
           <td class="muted">${esc((s.addedBy || "").slice(0, 8))}</td>
-          <td><button class="tiny danger" onclick="removeSong('${s.id}')">删除</button></td>
+          <td><button class="tiny danger" data-act="removeSong" data-id="${esc(s.id)}">删除</button></td>
         </tr>`,
         )
         .join("");
     }
+    patchRoomRow(x); // 列表里这一行同步成实时数据
   } catch (e) {
     flash("加载房间详情失败：" + (e.message || e), false);
   }
@@ -296,9 +353,6 @@ function esc(s) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
-}
-function enc(s) {
-  return encodeURIComponent(s);
 }
 
 // ===== 预制曲库管理（后台可增删改，实时同步给所有房间）=====
@@ -524,6 +578,7 @@ if (TOKEN) {
         app.classList.remove("hidden");
         loadRooms();
         ping();
+        startRoomsAutoRefresh();
         return;
       }
     } catch {}
