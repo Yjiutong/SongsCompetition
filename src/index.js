@@ -8,6 +8,8 @@
 //  - /admin/api/rooms     -> 列出所有房间（需 ADMIN_TOKEN）
 //  - /admin/api/rooms/:name           -> 某房间详情（需 ADMIN_TOKEN）
 //  - /admin/api/rooms/:name/action     -> 对房间执行管理操作（需 ADMIN_TOKEN）
+//    支持 remove_song / remove_participant / clear_songs / reset / wipe / notice，
+//    以及 delete（删除房间：真正移除 DO 实例并从索引注销，仅无人在线时可删）
 //  - /admin/api/library                -> 读取全局预制曲库（需 ADMIN_TOKEN）
 //  - /admin/api/library/action         -> 编辑预制曲库 / 恢复默认（需 ADMIN_TOKEN）
 //  - 其它路径            -> 由 Workers Static Assets 提供静态文件（public/）
@@ -57,6 +59,12 @@ function postBody(obj) {
 async function registerRoom(env, name) {
   if (!name) return;
   await callDO(env, INDEX_NAME, "/__index/register", postBody({ name }));
+}
+
+// 从房间索引注销（后台删除房间用；失败不影响删除本身）
+async function unregisterRoom(env, name) {
+  if (!name) return;
+  await callDO(env, INDEX_NAME, "/__index/unregister", postBody({ name }));
 }
 
 // 读取索引里的全部房间名（排除保留名）
@@ -289,6 +297,29 @@ async function handle(request, env, ctx) {
           body = {};
         }
         const { action, ...payload } = body;
+        // 删除房间：真正移除 DO 实例（storage 一并清掉）并从索引注销。
+        // 门槛是「无人在线」——在线数以 DO 内的实时状态为准，后台列表可能是几分钟前的旧数据。
+        // 极小竞争窗口（读到 0 人到执行 delete 之间有人进房）可接受：进房者的连接会被
+        // 断开，重新进入即得到全新空房间。
+        if (action === "delete") {
+          const view = await callDO(env, name, "/__admin/view", postBody({ name }));
+          const online =
+            view && typeof view.onlineCount === "number"
+              ? view.onlineCount
+              : view && Array.isArray(view.participants)
+                ? view.participants.filter((p) => p && p.online).length
+                : 0;
+          if (online > 0) {
+            return json({ ok: false, msg: "房间内还有 " + online + " 名在线玩家，暂不能删除" }, 400);
+          }
+          try {
+            await env.ROOM.delete(env.ROOM.idFromName(name));
+          } catch (e) {
+            return json({ ok: false, msg: "删除实例失败：" + String((e && e.message) || e) }, 500);
+          }
+          await unregisterRoom(env, name);
+          return json({ ok: true, msg: "已删除房间" }, 200);
+        }
         const res = await callDO(env, name, "/__admin/act", postBody({ name, action, payload }));
         return json(res, res && res.ok ? 200 : 400);
       }

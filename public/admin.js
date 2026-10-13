@@ -95,6 +95,7 @@ function phasePill(ph) {
 async function loadRooms() {
   const body = document.getElementById("roomsBody");
   body.innerHTML = '<tr><td colspan="6" class="muted">加载中…</td></tr>';
+  document.getElementById("roomsMsg").classList.add("hidden"); // 清掉上一次的列表级提示
   try {
     const j = await apiJson("/admin/api/rooms");
     ROOMS = Array.isArray(j) ? j : [];
@@ -102,6 +103,19 @@ async function loadRooms() {
   } catch (e) {
     body.innerHTML = '<tr><td colspan="6" class="err">加载失败：' + esc(e.message || e) + "</td></tr>";
   }
+}
+
+// 房间行的「删除」按钮：无人在线才可点；有人在线时禁用并说明原因
+// （服务端也会再校验一次，避免后台列表是旧数据时误删）
+function delBtn(x) {
+  const busy = (x.onlineCount || 0) > 0;
+  return (
+    '<button class="tiny danger" onclick="delRoom(\'' +
+    enc(x.name) +
+    '\')"' +
+    (busy ? " disabled title=\"房间内有人在线，暂不能删除\"" : ' title="删除房间，数据不可恢复"') +
+    ">删除</button>"
+  );
 }
 
 function renderRooms() {
@@ -120,10 +134,26 @@ function renderRooms() {
       <td><span class="dot ${x.onlineCount > 0 ? "on" : ""}"></span>${x.onlineCount}/${x.participantCount}</td>
       <td>${x.songCount}</td>
       <td>${x.phase === "playing" ? x.currentRound + 1 + "/" + (x.totalRounds || "?") : "-"}</td>
-      <td><button class="tiny" onclick="openDetail('${enc(x.name)}')">查看 / 管理</button></td>
+      <td><button class="tiny" onclick="openDetail('${enc(x.name)}')">查看 / 管理</button>${delBtn(x)}</td>
     </tr>`,
     )
     .join("");
+}
+
+// 删除房间：仅无人在线时可删（服务端以实时状态为准再校验）。
+// 删掉的不只是数据，房间本身也会从后台列表消失；之后有人再进同名房间会是全新空房间。
+async function delRoom(name) {
+  if (!name) return;
+  if (!confirm("确认删除房间「" + name + "」？房间数据会被移除并从后台列表消失，此操作不可撤销。")) return;
+  const j = await postAction({ action: "delete" }, name);
+  if (j.ok) {
+    if (current === name) closeDetail();
+    await loadRooms();
+    flashRooms("已删除房间「" + name + "」", true);
+    ping();
+  } else {
+    flashRooms("删除失败：" + failMsg(j), false);
+  }
 }
 
 async function openDetail(name) {
@@ -139,6 +169,12 @@ async function openDetail(name) {
     const nb = document.getElementById("detailNotice");
     nb.textContent = x.notice ? "通知：" + x.notice : "";
     nb.style.display = x.notice ? "" : "none";
+
+    // 「删除房间」仅在无人在线时可点（服务端还会再校验）
+    const dBtn = document.getElementById("detailDelBtn");
+    const busy = (x.onlineCount || 0) > 0;
+    dBtn.disabled = busy;
+    dBtn.title = busy ? "房间内有人在线，暂不能删除" : "删除房间，数据不可恢复";
 
     const pb = document.getElementById("partsBody");
     if (!x.participants.length) {
@@ -183,9 +219,11 @@ function closeDetail() {
   document.getElementById("detail").classList.add("hidden");
 }
 
-// 统一的「操作」调用：始终返回 {ok,msg}，不因非 JSON 响应而崩
-async function postAction(payload) {
-  const r = await api("/admin/api/rooms/" + encodeURIComponent(current) + "/action", {
+// 统一的「操作」调用：始终返回 {ok,msg}，不因非 JSON 响应而崩。
+// room 省略时操作当前打开详情的房间；列表行上的操作（如删除）显式传房间名。
+async function postAction(payload, room) {
+  const target = room || current;
+  const r = await api("/admin/api/rooms/" + encodeURIComponent(target) + "/action", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
@@ -242,6 +280,14 @@ function flash(msg, ok) {
   const el = document.getElementById("detailMsg");
   el.textContent = msg;
   el.className = ok ? "ok" : "err";
+}
+
+// 列表级提示（删除房间等不依赖详情面板打开的操作）
+function flashRooms(msg, ok) {
+  const el = document.getElementById("roomsMsg");
+  el.textContent = msg;
+  el.className = ok ? "ok" : "err";
+  el.classList.remove("hidden");
 }
 
 function esc(s) {

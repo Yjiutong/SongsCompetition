@@ -514,6 +514,10 @@ export class Room {
       const b = await bodyJson(request);
       return jsonRes(await this.registerRoom(b.name || ""));
     }
+    if (url.pathname === "/__index/unregister" && request.method === "POST") {
+      const b = await bodyJson(request);
+      return jsonRes(await this.unregisterRoom(b.name || ""));
+    }
     if (url.pathname === "/__index/list") {
       return jsonRes(await this.listRooms());
     }
@@ -559,6 +563,17 @@ export class Room {
     const rooms = Object.entries(idx).map(([name, lastSeen]) => ({ name, lastSeen }));
     rooms.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
     return { rooms };
+  }
+
+  // 后台删除房间时调用：把房间名从索引摘掉，列表不再展示它。
+  // 注意：这只动索引，房间实例本身由 Worker 用 ROOM.delete() 移除。
+  async unregisterRoom(name) {
+    if (!name) return { ok: false, msg: "缺少房间名" };
+    const idx = (await this.state.storage.get("index")) || {};
+    if (!(name in idx)) return { ok: true, removed: false, count: Object.keys(idx).length };
+    delete idx[name];
+    await this.state.storage.put("index", idx);
+    return { ok: true, removed: true, count: Object.keys(idx).length };
   }
 
   // ===== 预制曲库（仅供保留实例 __rooms_index__ 使用）=====

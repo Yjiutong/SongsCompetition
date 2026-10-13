@@ -28,6 +28,8 @@
   button.danger{color:#ffd9d5;border-color:#5a2a26}
   button.danger:hover{background:#3a1c19}
   button.tiny{padding:4px 9px;font-size:12px}
+  button:disabled{opacity:.4;cursor:not-allowed;border-color:var(--line)}
+  button:disabled:hover{border-color:var(--line)}
   input[type=text],input[type=password],input[type=search]{font-family:inherit;background:#0d0b07;
     border:1px solid var(--line);color:var(--text);border-radius:8px;padding:8px 10px;font-size:14px;width:100%}
   input:focus{outline:none;border-color:var(--gold-soft)}
@@ -127,6 +129,7 @@
       <button onclick="lookupRoom()">查看</button>
     </div>
     <div class="badge" id="pingInfo"></div>
+    <div class="ok hidden" id="roomsMsg"></div>
     <table id="roomsTable">
       <thead><tr><th>房间名</th><th>阶段</th><th>在线/总数</th><th>歌曲</th><th>轮次</th><th>操作</th></tr></thead>
       <tbody id="roomsBody"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
@@ -146,6 +149,7 @@
       <button onclick="act('reset')">重置对局（保留歌单）</button>
       <button onclick="act('clear_songs')">清空歌单</button>
       <button class="danger" onclick="act('wipe')">彻底清空房间</button>
+      <button class="danger" id="detailDelBtn" onclick="delRoom(current)">删除房间</button>
     </div>
     <div class="notice-row">
       <input type="text" id="noticeText" placeholder="向房间内所有人广播一条通知…" maxlength="200" />
