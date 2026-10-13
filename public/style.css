@@ -211,18 +211,30 @@ h1,h2,h3,.serif{font-family:"Songti SC","STSong","SimSun","Noto Serif SC",serif}
 .modal-close:hover{color:var(--text)}
 
 /* 曲库 */
-.lib-body{display:grid;grid-template-columns:150px 1fr;gap:14px;min-height:280px;flex:1}
-.lib-artists{display:flex;flex-direction:column;gap:4px;overflow-y:auto;max-height:52vh;padding-right:4px}
-.lib-artist{
-  text-align:left;background:transparent;border:1px solid transparent;border-radius:8px;
-  color:var(--text-dim);font-size:13px;padding:8px 10px;cursor:pointer;font-family:inherit;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+.lib-body{display:grid;grid-template-columns:180px 1fr;gap:14px;min-height:280px;flex:1}
+.lib-artists{display:flex;flex-direction:column;gap:4px;overflow-y:auto;max-height:56vh;padding-right:4px}
+/* 分类小标题：虚拟歌姬 / 作者 */
+.lib-group{
+  flex:none;font-size:11px;letter-spacing:2px;color:var(--text-dim);
+  padding:10px 8px 5px;border-bottom:1px solid var(--line);margin-bottom:3px;
 }
+.lib-group:first-child{padding-top:0}
+.lib-artist{
+  /* 关键：这里是 flex 列的子项且 overflow:hidden，不写 flex:none 会被压缩到
+     只剩 18px 高，中文字被上下裁掉变成一团乱码。 */
+  flex:none;
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+  text-align:left;background:transparent;border:1px solid transparent;border-radius:8px;
+  color:var(--text-dim);font-size:13px;line-height:1.4;padding:7px 10px;cursor:pointer;font-family:inherit;
+}
+.lib-artist-name{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lib-artist-count{flex:none;font-size:11px;color:var(--text-dim);opacity:.65}
 .lib-artist:hover{color:var(--text);background:var(--bg-soft)}
 .lib-artist.active{color:var(--gold);border-color:rgba(212,168,67,.4);background:rgba(212,168,67,.08)}
-.lib-songs{display:flex;flex-direction:column;gap:6px;overflow-y:auto;max-height:52vh}
+.lib-artist.active .lib-artist-count{color:var(--gold);opacity:.85}
+.lib-songs{display:flex;flex-direction:column;gap:6px;overflow-y:auto;max-height:56vh}
 .lib-song{
-  display:flex;align-items:center;gap:10px;padding:8px 12px;
+  flex:none;display:flex;align-items:center;gap:10px;padding:8px 12px;
   background:var(--bg-soft);border:1px solid var(--line);border-radius:8px;
 }
 .lib-song-name{flex:1;font-size:13px;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

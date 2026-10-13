@@ -257,11 +257,17 @@ function resetGame() {
 let libArtist = null;
 let libQuery = "";
 
+// 曲库里的第一个名字（默认选中），供打开弹窗时用
+function firstLibraryName() {
+  const group = SONG_LIBRARY_GROUPS[0];
+  if (!group) return null;
+  return Object.keys(SONG_LIBRARY[group])[0] || null;
+}
+
 function openLibrary() {
   libQuery = "";
   document.getElementById("libSearch").value = "";
-  const artists = Object.keys(SONG_LIBRARY);
-  libArtist = artists[0] || null;
+  libArtist = firstLibraryName();
   document.getElementById("libraryModal").style.display = "flex";
   renderLibrary();
 }
@@ -271,35 +277,55 @@ function closeLibrary() {
 
 function renderLibrary() {
   libQuery = document.getElementById("libSearch").value.trim().toLowerCase();
-  const artists = Object.keys(SONG_LIBRARY);
-  const hit = (a) =>
+  // 命中规则：歌姬 / 作者名，或他名下的任意一首歌名，任一命中即可
+  const hit = (name) =>
     !libQuery ||
-    a.toLowerCase().includes(libQuery) ||
-    SONG_LIBRARY[a].some((t) => t.toLowerCase().includes(libQuery));
-  const artistHits = artists.filter(hit);
+    name.toLowerCase().includes(libQuery) ||
+    SONG_LIBRARY_SONGS[name].some((t) => t.toLowerCase().includes(libQuery));
 
-  // 左侧：歌手列表（有命中歌曲才显示）
+  // 左侧：按分类分组列出歌手 / 作者（没有任何命中的整组不显示）
+  const grouped = [];
+  for (const group of SONG_LIBRARY_GROUPS) {
+    const names = Object.keys(SONG_LIBRARY[group]).filter(hit);
+    if (names.length) grouped.push([group, names]);
+  }
   const artistBox = document.getElementById("libArtists");
   artistBox.textContent = "";
-  for (const a of artistHits) {
-    const item = document.createElement("button");
-    item.type = "button";
-    item.className = "lib-artist" + (a === libArtist ? " active" : "");
-    item.textContent = a;
-    item.onclick = () => {
-      libArtist = a;
-      renderLibrary();
-    };
-    artistBox.appendChild(item);
+  for (const [group, names] of grouped) {
+    const head = document.createElement("div");
+    head.className = "lib-group";
+    head.textContent = group;
+    artistBox.appendChild(head);
+    for (const name of names) {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "lib-artist" + (name === libArtist ? " active" : "");
+      const label = document.createElement("span");
+      label.className = "lib-artist-name";
+      label.textContent = name;
+      const count = document.createElement("span");
+      count.className = "lib-artist-count";
+      count.textContent = SONG_LIBRARY_SONGS[name].length;
+      item.appendChild(label);
+      item.appendChild(count);
+      item.onclick = () => {
+        libArtist = name;
+        renderLibrary();
+      };
+      artistBox.appendChild(item);
+    }
   }
   // 当前选中的歌手没有命中时，切到第一个有命中的歌手
-  if (artistHits.indexOf(libArtist) < 0) libArtist = artistHits[0] || null;
+  const allHits = grouped.flatMap(([, names]) => names);
+  if (allHits.indexOf(libArtist) < 0) libArtist = allHits[0] || null;
 
   // 右侧：歌曲列表
   const songBox = document.getElementById("libSongs");
   songBox.textContent = "";
-  const songs = SONG_LIBRARY[libArtist] || [];
-  const shown = libQuery ? songs.filter((t) => t.toLowerCase().includes(libQuery)) : songs;
+  const songs = SONG_LIBRARY_SONGS[libArtist] || [];
+  // 搜索词命中歌手/作者名时，就把他的歌全部列出来；只有搜的是歌名时才按歌名过滤
+  const nameHit = !!libQuery && !!libArtist && libArtist.toLowerCase().includes(libQuery);
+  const shown = !libQuery || nameHit ? songs : songs.filter((t) => t.toLowerCase().includes(libQuery));
   if (shown.length === 0) {
     songBox.appendChild(emptyNode("没有匹配的歌曲"));
     return;
