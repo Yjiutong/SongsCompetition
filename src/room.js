@@ -455,6 +455,24 @@ export class Room {
     return { ok, msg };
   }
 
+  // 删除房间：把本实例的存储整个清掉并取消 alarm，让房间回到「从未存在」的状态。
+  // 注意：Workers 运行时并没有提供「从代码里删除 DO 实例」的接口
+  // （DurableObjectNamespace 只有 idFromName / newUniqueId / idFromString /
+  //  get / getByName / jurisdiction，没有 delete；实例只能由 wrangler CLI 或
+  //  控制台删除）。所以这里退一步：清空实例全部存储 + 从索引注销，效果与删除一致——
+  // 房间从后台列表消失，之后有人进入同名房间会得到全新空房间。
+  async deleteRoom() {
+    await this.getState(); // 确保状态已初始化，deleteAll 才有东西可清
+    for (const ws of this.state.getWebSockets()) {
+      try {
+        ws.close();
+      } catch {}
+    }
+    await this.state.storage.deleteAlarm();
+    await this.state.storage.deleteAll(); // state 等所有键一并清掉
+    return { ok: true, msg: "已清空房间数据" };
+  }
+
   // 向房间内所有 WebSocket 客户端广播。
   // 隐藏模式下按观看者身份分别序列化，避免把别人未公开的选择发出去。
   async broadcast(s) {
@@ -509,6 +527,9 @@ export class Room {
     if (url.pathname === "/__admin/act" && request.method === "POST") {
       const b = await bodyJson(request);
       return jsonRes(await this.adminAction(b.name || "", b.action, b.payload || {}));
+    }
+    if (url.pathname === "/__admin/delete" && request.method === "POST") {
+      return jsonRes(await this.deleteRoom());
     }
     if (url.pathname === "/__index/register" && request.method === "POST") {
       const b = await bodyJson(request);

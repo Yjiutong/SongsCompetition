@@ -9,7 +9,7 @@
 //  - /admin/api/rooms/:name           -> 某房间详情（需 ADMIN_TOKEN）
 //  - /admin/api/rooms/:name/action     -> 对房间执行管理操作（需 ADMIN_TOKEN）
 //    支持 remove_song / remove_participant / clear_songs / reset / wipe / notice，
-//    以及 delete（删除房间：真正移除 DO 实例并从索引注销，仅无人在线时可删）
+//    以及 delete（删除房间：清空该实例全部存储并从索引注销，仅无人在线时可删）
 //  - /admin/api/library                -> 读取全局预制曲库（需 ADMIN_TOKEN）
 //  - /admin/api/library/action         -> 编辑预制曲库 / 恢复默认（需 ADMIN_TOKEN）
 //  - 其它路径            -> 由 Workers Static Assets 提供静态文件（public/）
@@ -297,9 +297,9 @@ async function handle(request, env, ctx) {
           body = {};
         }
         const { action, ...payload } = body;
-        // 删除房间：真正移除 DO 实例（storage 一并清掉）并从索引注销。
+        // 删除房间：清空该 DO 实例的全部存储（含 alarm）并从索引注销。
         // 门槛是「无人在线」——在线数以 DO 内的实时状态为准，后台列表可能是几分钟前的旧数据。
-        // 极小竞争窗口（读到 0 人到执行 delete 之间有人进房）可接受：进房者的连接会被
+        // 极小竞争窗口（读到 0 人到执行清理之间有人进房）可接受：进房者的连接会被
         // 断开，重新进入即得到全新空房间。
         if (action === "delete") {
           const view = await callDO(env, name, "/__admin/view", postBody({ name }));
@@ -312,10 +312,12 @@ async function handle(request, env, ctx) {
           if (online > 0) {
             return json({ ok: false, msg: "房间内还有 " + online + " 名在线玩家，暂不能删除" }, 400);
           }
+          // 运行时没有「从代码删除 DO 实例」的 API（namespace 上没有 delete），
+          // 由 DO 自己清空全部存储，效果等同删除实例：列表消失、同名房间重建为空。
           try {
-            await env.ROOM.delete(env.ROOM.idFromName(name));
+            await callDO(env, name, "/__admin/delete", postBody({ name }));
           } catch (e) {
-            return json({ ok: false, msg: "删除实例失败：" + String((e && e.message) || e) }, 500);
+            return json({ ok: false, msg: "清理房间数据失败：" + String((e && e.message) || e) }, 500);
           }
           await unregisterRoom(env, name);
           return json({ ok: true, msg: "已删除房间" }, 200);
