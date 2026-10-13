@@ -11,8 +11,10 @@
   --bye:#60a5fa;
 }
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{background:var(--bg);color:var(--text);font-family:'Noto Sans SC',system-ui,sans-serif;min-height:100vh}
-h1,h2,h3,.serif{font-family:'Noto Serif SC',serif}
+/* 字体全部走系统字体：不引外部字体（Google Fonts 在国内访问不稳定，
+   而且是渲染阻塞请求，会把首屏和每次「清除缓存」刷新都拖慢） */
+html,body{background:var(--bg);color:var(--text);font-family:"PingFang SC","Microsoft YaHei","Hiragino Sans GB",system-ui,sans-serif;min-height:100vh}
+h1,h2,h3,.serif{font-family:"Songti SC","STSong","SimSun","Noto Serif SC",serif}
 
 .view{display:none;min-height:100vh;padding:32px 20px 60px}
 .view.active{display:block}
@@ -61,7 +63,7 @@ h1,h2,h3,.serif{font-family:'Noto Serif SC',serif}
   gap:16px;flex-wrap:wrap;margin-bottom:24px;
 }
 .room-tag{font-size:12px;color:var(--text-dim);letter-spacing:2px}
-.room-id{font-family:'Noto Serif SC',serif;font-size:26px;font-weight:700;color:var(--gold)}
+.room-id{font-family:"Songti SC","STSong","SimSun","Noto Serif SC",serif;font-size:26px;font-weight:700;color:var(--gold)}
 .head-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .conn{font-size:12px;padding:5px 12px;border-radius:20px;border:1px solid var(--line)}
 .conn-on{color:var(--win);border-color:rgba(74,222,128,.4);background:rgba(74,222,128,.1)}
@@ -118,7 +120,7 @@ h1,h2,h3,.serif{font-family:'Noto Serif SC',serif}
   background:var(--card);border:1px solid var(--line);border-radius:12px;
   padding:14px 20px;margin-bottom:18px;
 }
-.round-no{font-family:'Noto Serif SC',serif;font-size:18px;font-weight:700;color:var(--gold)}
+.round-no{font-family:"Songti SC","STSong","SimSun","Noto Serif SC",serif;font-size:18px;font-weight:700;color:var(--gold)}
 .round-status{font-size:13px;color:var(--text-dim)}
 .round-status.done{color:var(--win)}
 
